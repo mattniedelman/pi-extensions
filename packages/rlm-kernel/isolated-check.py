@@ -227,19 +227,25 @@ def supervise(command, *, timeout, deadline):
                 while True:
                     owned.discover()
                     if interrupted:
-                        return 128 + interrupted
+                        status = 128 + interrupted
+                        break
                     status = proc.poll()
                     if status is not None:
-                        return status if status >= 0 else 128 - status
+                        status = status if status >= 0 else 128 - status
+                        break
                     if time.monotonic() >= deadline:
                         print(f"isolated-check: deadline exceeded ({timeout:g}s)", file=sys.stderr, flush=True)
-                        return 124
+                        status = 124
+                        break
                     time.sleep(.01)
             finally:
                 owned.cleanup()
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
+    # A handled signal during cleanup must still cancel a successful command.
+    # Cleanup/setup exceptions reach the CLI as 125 before this selection.
+    return 128 + interrupted if interrupted and status != 125 else status
 
 
 def run_owned(command, *, cwd, env, timeout):
@@ -276,7 +282,7 @@ def run_owned(command, *, cwd, env, timeout):
             if time.monotonic() >= deadline + 3:
                 raise RuntimeError("supervisor exceeded deadline and cleanup allowance")
             time.sleep(.01)
-        return proc.returncode if proc.returncode >= 0 else 128 - proc.returncode
+        status = proc.returncode if proc.returncode >= 0 else 128 - proc.returncode
     finally:
         try:
             if proc is not None and proc.poll() is None:
@@ -291,6 +297,9 @@ def run_owned(command, *, cwd, env, timeout):
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
+    # The caller can be interrupted after the supervisor has already exited
+    # (too late to forward). Its own cancellation still wins, except for 125.
+    return 128 + interrupted if interrupted and status != 125 else status
 
 
 def main():
