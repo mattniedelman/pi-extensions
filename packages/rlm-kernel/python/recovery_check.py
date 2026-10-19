@@ -14,6 +14,12 @@ import sidecar
 
 ROOT = Path(__file__).parent
 BOUNDARIES = ("raw-write", "names-write", "raw-replace", "names-replace")
+CHILD_TIMEOUT = 5
+
+
+def run_checks(command=None, *, timeout=20):
+    subprocess.run(command or [sys.executable, str(ROOT / "recovery_check.py")],
+                   check=True, timeout=timeout)
 
 
 def contents(path):
@@ -38,7 +44,7 @@ def restored(state, expected_names, expected_x):
     process = subprocess.run(
         [sys.executable, str(ROOT / "sidecar.py"), "--state", str(state)],
         input="".join(json.dumps(request) + "\n" for request in requests),
-        capture_output=True, text=True, timeout=5,
+        capture_output=True, text=True, timeout=CHILD_TIMEOUT,
         env={**os.environ, "PI_RLM_MAX_MEMORY": "8000000"},
     )
     assert process.returncode == 0, process.stderr
@@ -58,7 +64,7 @@ def failed_response(state, boundary):
         [sys.executable, str(ROOT / "recovery_check.py"), "--failure-worker", str(state), boundary],
         input=json.dumps({"id": 1, "code": "x = 99\nnew_name = 'tiny'\nx"}) + "\n"
         + json.dumps({"id": 2, "operation": "shutdown"}) + "\n",
-        capture_output=True, text=True, timeout=5,
+        capture_output=True, text=True, timeout=CHILD_TIMEOUT,
         env={**os.environ, "PI_RLM_MAX_MEMORY": "8000000"},
     )
     assert process.returncode == 0, process.stderr
@@ -104,6 +110,10 @@ def fail_at(boundary, state):
 
 
 class RecoveryChecks(unittest.TestCase):
+    def test_stalled_workers(self):
+        from recovery_timeout_check import check_timeouts
+        check_timeouts(self)
+
     def test_failed_checkpoint(self):
         cases = [(prior, boundary) for prior in ("seeded", "untracked", "empty") for boundary in BOUNDARIES]
         cases.append(("seeded", "directory"))

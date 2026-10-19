@@ -363,6 +363,38 @@ def safety_probes(runner, root, fake_pi):
     return len(cases) + 2
 
 
+def capture_probes(runner):
+    """File-backed streams must retain output without pipe/deadline deadlocks."""
+    with tempfile.TemporaryDirectory(prefix="pi-owned-capture-") as directory:
+        root = Path(directory)
+        command = [sys.executable, "-c", "import sys; data=sys.stdin.read(); "
+                   "sys.stdout.write(data+'o'*80000); sys.stderr.write('e'*80000)"]
+        result = runner.run_owned_capture(command, cwd=root, env=dict(os.environ),
+                                          timeout=2, input="tiny\n\U0001f600\n")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "tiny\n\U0001f600\n" + "o" * 80000
+        assert result.stderr.startswith("e" * 80000) and "0 survivors" in result.stderr
+        count = 1
+        for mode, expected in (("success", 0), ("failure", 1), ("eof", 0), ("hang", 124)):
+            record = root / mode
+            started = time.monotonic()
+            result = runner.run_owned_capture([sys.executable, "-c", TREE, str(record), mode],
+                                              cwd=root, env=dict(os.environ), timeout=.5 if mode == "hang" else 2)
+            assert result.returncode == expected, (mode, result)
+            assert time.monotonic() - started < 3
+            assert_gone(record)  # before the self-test's enclosing backup
+            assert "0 survivors" in result.stderr
+            if mode == "hang":
+                assert "deadline exceeded" in result.stderr
+            count += 1
+        result = runner.run_owned_capture([sys.executable, "-c", "raise SystemExit(125)"],
+                                          cwd=root, env=dict(os.environ), timeout=2)
+        assert result.returncode == 125 and "0 survivors" in result.stderr
+        count += 1
+    print(f"isolated-check capture: {count} checks passed (absence BEFORE backup)", flush=True)
+    return count
+
+
 def self_test(runner):
     count = 0
     started = time.monotonic()
@@ -462,6 +494,7 @@ assert not Path(Path(str(record) + '.env').read_text()).parent.exists(), 'runner
             assert_gone(record)
             count += 1
         count += safety_probes(runner, root, fake_pi)
+    count += capture_probes(runner)
     print(f"isolated-check self-test: {count} checks passed in {time.monotonic() - started:.2f}s", flush=True)
 
 
@@ -470,4 +503,7 @@ if __name__ == "__main__":
     spec = importlib.util.spec_from_file_location("isolated_runner", sys.argv[1])
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
-    self_test(runner)
+    if sys.argv[2:] == ["--capture-only"]:
+        capture_probes(runner)
+    else:
+        self_test(runner)
