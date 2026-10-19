@@ -52,6 +52,22 @@ def restored(state, expected_names, expected_x):
     assert messages[3]["ok"], messages
 
 
+def failed_response(state, boundary):
+    # Exercise main()'s real JSONL error response too, not only Kernel.execute().
+    process = subprocess.run(
+        [sys.executable, str(ROOT / "recovery_check.py"), "--failure-worker", str(state), boundary],
+        input=json.dumps({"id": 1, "code": "x = 99\nnew_name = 'tiny'\nx"}) + "\n"
+        + json.dumps({"id": 2, "operation": "shutdown"}) + "\n",
+        capture_output=True, text=True, timeout=5,
+        env={**os.environ, "PI_RLM_MAX_MEMORY": "8000000"},
+    )
+    assert process.returncode == 0, process.stderr
+    messages = [json.loads(line) for line in process.stdout.splitlines()]
+    assert len(messages) == 3 and messages[0] == {"ready": True}, messages
+    assert messages[1]["id"] == 1 and not messages[1]["ok"] and "Error" in messages[1]["error"], messages
+    assert messages[2]["ok"], messages
+
+
 @contextlib.contextmanager
 def fail_at(boundary, state):
     raw_temp = state.with_suffix(".tmp")
@@ -124,7 +140,7 @@ class RecoveryChecks(unittest.TestCase):
                     self.assertFalse(response["ok"], response)
                     self.assertIn("error", response)
                     if expected_x is None:
-                        with self.assertRaisesRegex(Exception, "x"):
+                        with self.assertRaisesRegex(Exception, "NameError"):
                             live_x(kernel)
                     else:
                         self.assertEqual(live_x(kernel), 40)
@@ -136,9 +152,13 @@ class RecoveryChecks(unittest.TestCase):
                     self.assertFalse(raw_temp.exists(), "partial raw staging file leaked")
                     if boundary == "directory":
                         self.assertTrue(names_temp.is_dir(), "must not delete the injected obstacle")
-                        names_temp.rmdir()
                     else:
                         self.assertFalse(names_temp.exists(), "partial name staging file leaked")
+                    failed_response(state, boundary)
+                    self.assertEqual(contents(state), previous_raw)
+                    self.assertEqual(contents(names), expected_metadata)
+                    if boundary == "directory":
+                        names_temp.rmdir()
                     self.assertEqual(stat.S_IMODE(state.parent.stat().st_mode), 0o700)
                     for path in (state, names):
                         if path.exists():
@@ -188,4 +208,11 @@ class RecoveryChecks(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) > 1 and sys.argv[1] == "--failure-worker":
+        state, boundary = Path(sys.argv[2]), sys.argv[3]
+        sys.argv = [str(ROOT / "sidecar.py"), "--state", str(state)]
+        failure = contextlib.nullcontext() if boundary == "directory" else fail_at(boundary, state)
+        with failure:
+            sidecar.main()
+    else:
+        unittest.main()

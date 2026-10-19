@@ -125,13 +125,29 @@ class Kernel:
         self.state_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         os.chmod(self.state_path.parent, 0o700)
         temp = self.state_path.with_suffix(".tmp")
-        temp.write_bytes(blob)
-        os.chmod(temp, 0o600)
-        os.replace(temp, self.state_path)
         names_temp = self.names_path.with_suffix(".tmp")
-        names_temp.write_text(json.dumps(sorted(self.names)))
-        os.chmod(names_temp, 0o600)
-        os.replace(names_temp, self.names_path)
+        names_replaced = False
+        try:
+            temp.write_bytes(blob)
+            os.chmod(temp, 0o600)
+            names_temp.write_text(json.dumps(sorted(self.names)))
+            os.chmod(names_temp, 0o600)
+            os.replace(names_temp, self.names_path)
+            names_replaced = True
+            # The raw dump is authoritative. No fallible work follows its commit.
+            os.replace(temp, self.state_path)
+        except Exception:
+            if names_replaced:
+                # Do not advertise names from an execution whose raw commit failed.
+                # Data survives; a fresh kernel's convenience-name list is empty.
+                self.names_path.unlink(missing_ok=True)
+            for path in (temp, names_temp):
+                try:
+                    path.unlink(missing_ok=True)
+                except IsADirectoryError:
+                    # Leave a directory obstacle alone, preserving the write error.
+                    pass
+            raise
 
     def execute(self, request_id: Any, code: str, tools: list[dict[str, Any]]) -> dict[str, Any]:
         previous = self.session.dump()
