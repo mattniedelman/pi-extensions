@@ -10,11 +10,12 @@ cache, but uses private venvs. This is test isolation, not a security sandbox.
 Exit: command status, 124 deadline, 128+signal interruption, 125 cleanup/setup
 failure, 127 missing command. TERM/INT/HUP are handled; allow at least 3s beyond
 the internal deadline in an outer TERM guard. SIGKILL cannot be handled by any
-in-process runner.
+in-process runner. Linux /proc, child subreaping and pidfd signals are required.
 """
 import argparse
 from contextlib import contextmanager
 import ctypes
+import json
 import math
 import os
 from pathlib import Path
@@ -105,26 +106,42 @@ def subreaper():
 
 
 class OwnedProcesses:
-    def __init__(self, proc, excluded):
+    """Track the sole command tree of a fresh, dedicated supervisor.
+
+    The supervisor starts with no children and launches exactly one command.
+    Thus every child edge in this scope has positive command ancestry, including
+    fast-exiting parents' adoptees. This class must not run in the caller: caller
+    adoptees can belong to unrelated pre-existing or dynamically forked trees.
+    """
+    def __init__(self, proc):
         self.proc = proc
-        self.excluded = excluded
-        self.seen = {}  # pid -> starttime; never signal a recycled PID
+        self.seen = {}  # pid -> current starttime
+        self.observed = set()  # (pid, starttime), including owned PID reuse
 
     def discover(self):
-        pending = list(children(os.getpid())) + list(self.seen)
+        # Fresh scope roots carry provenance; old observations only remain
+        # authorized while the identity matches. A recycled PID is not a root.
+        pending = [(pid, info[0]) for pid in children(os.getpid())
+                   if (info := process_info(pid)) and info[1] == os.getpid()]
+        pending.extend(self.seen.items())
         visited = set()
         while pending:
-            pid = pending.pop()
-            if pid in visited:
-                continue
-            visited.add(pid)
+            pid, expected = pending.pop()
             info = process_info(pid)
-            if info is None or self.excluded.get(pid) == info[0]:
+            if info is None or expected != info[0]:
                 continue
-            if pid in self.seen and self.seen[pid] != info[0]:
+            identity = (pid, info[0])
+            if identity in visited:
                 continue
+            visited.add(identity)
             self.seen[pid] = info[0]
-            pending.extend(children(pid))
+            self.observed.add(identity)
+            descendants = children(pid)
+            after = process_info(pid)
+            if after is None or after[0] != info[0]:
+                continue  # do not walk a recycled parent's unrelated subtree
+            pending.extend((child, child_info[0]) for child in descendants
+                           if (child_info := process_info(child)) and child_info[1] == pid)
 
     def remaining(self):
         self.discover()
@@ -140,28 +157,23 @@ class OwnedProcesses:
                 if (info := process_info(pid)) and info[0] == identity]
 
     def send(self, sig):
-        remaining = self.remaining()
-        # The initial group is private (start_new_session). Validate at least
-        # one owned member before addressing it; escaped groups get PID signals.
-        group_members = []
-        for pid in remaining:
+        # Signal every owned member of the private initial group and every
+        # escaped descendant individually. No group-wide authorization can
+        # accidentally include an unrelated member or a recycled group ID.
+        for pid in self.remaining():
             try:
-                if os.getpgid(pid) == self.proc.pid:
-                    group_members.append(pid)
+                fd = os.pidfd_open(pid)
+            except ProcessLookupError:
+                continue
+            try:
+                info = process_info(pid)
+                if info and info[0] == self.seen[pid]:
+                    # The handle pins the process across the check/signal gap.
+                    signal.pidfd_send_signal(fd, sig)
             except ProcessLookupError:
                 pass
-        if group_members:
-            try:
-                os.killpg(self.proc.pid, sig)
-            except ProcessLookupError:
-                pass
-        for pid in remaining:
-            info = process_info(pid)
-            if info and info[0] == self.seen[pid]:
-                try:
-                    os.kill(pid, sig)
-                except ProcessLookupError:
-                    pass
+            finally:
+                os.close(fd)
 
     def cleanup(self):
         # Re-discover on each pass, including newly adopted descendants after
@@ -177,12 +189,13 @@ class OwnedProcesses:
         if survivors:
             raise RuntimeError(f"owned descendants survived cleanup: {survivors}")
         self.proc.wait(timeout=.2)
-        print(f"isolated-check cleanup: {len(self.seen)} owned PIDs observed, 0 survivors", file=sys.stderr, flush=True)
+        print(f"isolated-check cleanup: {len(self.observed)} owned PIDs observed, 0 survivors", file=sys.stderr, flush=True)
 
 
-def run_owned(command, *, cwd, env, timeout):
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("timeout must be finite and positive")
+def supervise(command, *, timeout, deadline):
+    """Private entry point in a new interpreter, never in the caller process."""
+    if children(os.getpid()):
+        raise RuntimeError("supervisor must start without pre-existing children")
     interrupted = 0
 
     def on_signal(number, _frame):
@@ -195,14 +208,21 @@ def run_owned(command, *, cwd, env, timeout):
         signal.signal(sig, on_signal)
     try:
         with subreaper():
-            excluded = {pid: info[0] for pid in children(os.getpid()) if (info := process_info(pid))}
-            deadline = time.monotonic() + timeout
+            # Fail before launching anything if safe PID-handle signaling is
+            # unavailable, rather than discovering that during teardown.
+            if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+                raise RuntimeError("isolated-check requires Linux pidfd signal support")
+            fd = os.pidfd_open(os.getpid())
             try:
-                proc = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL, start_new_session=True)
+                signal.pidfd_send_signal(fd, 0)
+            finally:
+                os.close(fd)
+            try:
+                proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=True)
             except FileNotFoundError as error:
                 print(f"isolated-check: {error}", file=sys.stderr)
                 return 127
-            owned = OwnedProcesses(proc, excluded)
+            owned = OwnedProcesses(proc)
             try:
                 while True:
                     owned.discover()
@@ -222,7 +242,61 @@ def run_owned(command, *, cwd, env, timeout):
             signal.signal(sig, handler)
 
 
+def run_owned(command, *, cwd, env, timeout):
+    """Keep unrelated caller subtrees outside a dedicated command supervisor."""
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be finite and positive")
+    interrupted = 0
+
+    def on_signal(number, _frame):
+        nonlocal interrupted
+        interrupted = number
+
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+    for sig in previous:
+        signal.signal(sig, on_signal)
+    proc = None
+    deadline = time.monotonic() + timeout
+    try:
+        # Anonymous input avoids exposing commands in the supervisor argv or
+        # blocking on a full pipe before signal/deadline handling is active.
+        with tempfile.TemporaryFile(mode="w+") as request:
+            json.dump({"command": list(map(os.fspath, command)), "timeout": timeout,
+                       "deadline": deadline}, request)
+            request.seek(0)
+            proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--_supervise"],
+                                    cwd=cwd, env=env, stdin=request, start_new_session=True)
+        forwarded = 0
+        while proc.poll() is None:
+            if interrupted and interrupted != forwarded:
+                proc.send_signal(interrupted)
+                forwarded = interrupted
+            # The supervisor has its own deadline and bounded cleanup. Leave
+            # enough time for both before treating a wedged supervisor as failure.
+            if time.monotonic() >= deadline + 3:
+                raise RuntimeError("supervisor exceeded deadline and cleanup allowance")
+            time.sleep(.01)
+        return proc.returncode if proc.returncode >= 0 else 128 - proc.returncode
+    finally:
+        try:
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    # Like external SIGKILL, killing a wedged supervisor cannot
+                    # promise cleanup of unobserved escaped descendants.
+                    proc.kill()
+                    proc.wait(timeout=1)
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+
+
 def main():
+    if sys.argv[1:] == ["--_supervise"]:
+        request = json.load(sys.stdin)
+        return supervise(**request)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--timeout", type=float, default=120)
