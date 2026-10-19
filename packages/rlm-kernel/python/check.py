@@ -85,4 +85,5 @@ with tempfile.TemporaryDirectory() as directory:
     assert long_error[0]["ok"] is False
     assert len(long_error[0]["error"].encode()) <= 8192
 
+subprocess.run([sys.executable, str(ROOT / "recovery_check.py")], check=True, timeout=20)
 print("rlm-kernel sidecar checks passed")
