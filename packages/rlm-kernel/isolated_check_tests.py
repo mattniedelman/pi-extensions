@@ -298,6 +298,44 @@ assert status == expected, (case, target, status, expected)
 """
 
 
+CALLER_EXIT_GUARD = r"""
+import importlib.util, os, signal, subprocess, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('runner', sys.argv[1])
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+observed = []
+class ExitGate(subprocess.Popen):
+    def __init__(self, *args, **kwargs):
+        self.signaled = False
+        super().__init__(*args, **kwargs)
+        observed.append((self.pid, runner.process_info(self.pid)[0]))
+    def poll(self):
+        status = super().poll()
+        if status is not None and not self.signaled:
+            self.signaled = True
+            # Deliver only AFTER the real supervisor exits: forwarding can no
+            # longer affect it. Do not fabricate a poll result or command status.
+            os.kill(os.getpid(), signal.SIGTERM)
+        return status
+runner.subprocess.Popen = ExitGate
+command_status = int(sys.argv[2])
+with runner.isolated_environment() as env:
+    private = Path(env['PI_CODING_AGENT_DIR']).parent
+    status = runner.run_owned([sys.executable, '-c', 'raise SystemExit(%s)' % command_status],
+                              cwd=Path.cwd(), env=env, timeout=2)
+assert len(observed) == 1, observed
+for pid, identity in observed:
+    info = runner.process_info(pid)
+    assert not (info and info[0] == identity), 'supervisor identity survived BEFORE backup'
+assert not private.exists(), 'private directory survived BEFORE backup'
+expected = 125 if command_status == 125 else 143
+print(f'CALLER EXIT: command={command_status}, status={status}, expected={expected}; '
+      'supervisor identity absent and private directory removed BEFORE backup', flush=True)
+assert status == expected, (status, expected)
+"""
+
+
 def safety_probes(runner, root, fake_pi):
     failures = []
     cases = [(case, 'caller', signal.SIGTERM) for case in ('thread', 'termfork')]
@@ -315,8 +353,14 @@ def safety_probes(runner, root, fake_pi):
                                  env={**os.environ, 'PI_BIN': str(fake_pi)}, timeout=5)
         if status != 0:
             failures.append((case, target, sig.name, status))
+    for command_status in (0, 125):
+        status = runner.run_owned([sys.executable, '-c', CALLER_EXIT_GUARD, runner.__file__,
+                                  str(command_status)], cwd=root,
+                                 env={**os.environ, 'PI_BIN': str(fake_pi)}, timeout=3)
+        if status != 0:
+            failures.append(('caller-exit', command_status, status))
     assert not failures, failures
-    return len(cases)
+    return len(cases) + 2
 
 
 def self_test(runner):
