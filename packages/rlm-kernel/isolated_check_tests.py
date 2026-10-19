@@ -174,6 +174,151 @@ finally:
         print("REAL PI: explicit offline command ran in private cwd/agent/state/sessions; no local/global poison loaded; private root removed", flush=True)
 
 
+SAFETY_TREE = r"""
+import json, os, signal, subprocess, sys, threading, time
+from pathlib import Path
+root, mode = Path(sys.argv[1]), sys.argv[2]
+def record(name):
+    identity = Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]
+    (root / (name + '.json')).write_text(json.dumps({'pid': os.getpid(), 'identity': identity,
+        'private': str(Path(os.environ['PI_CODING_AGENT_DIR']).parent)}))
+def wait_for(name):
+    deadline = time.monotonic() + 2
+    while not (root / name).exists():
+        assert time.monotonic() < deadline, name
+        time.sleep(.002)
+if mode == 'child':
+    def term(*_):
+        (root / 'cleaning').touch()
+        # Thread coverage requires TERM discovery before the parent is killed
+        # and adoption could hide a missing non-main-thread children walk.
+        if (root / 'root.json').exists():
+            parent = json.loads((root / 'root.json').read_text())
+            if os.getppid() == parent['pid']:
+                (root / 'thread-term').touch()
+    signal.signal(signal.SIGTERM, term)
+    record('child')
+    time.sleep(30)
+elif mode == 'termfork':
+    fired = False
+    def term(*_):
+        global fired
+        if fired: return
+        fired = True
+        if os.fork() == 0:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            os.setsid()
+            record('fork1')
+            if os.fork(): os._exit(0)
+            os.setsid()
+            record('fork2')
+            time.sleep(30)
+            os._exit(0)
+        wait_for('fork2.json')
+    signal.signal(signal.SIGTERM, term)
+    record('root')
+    time.sleep(30)
+else:
+    def spawn():
+        subprocess.Popen([sys.executable, __file__, str(root), 'child'], start_new_session=True)
+        if mode == 'thread': time.sleep(30)
+    if mode == 'thread':
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        threading.Thread(target=spawn).start()
+    else:
+        spawn()
+    wait_for('child.json')
+    record('root')
+    if mode == 'thread': time.sleep(30)
+    sys.exit(125 if mode == 'exit125' else 0)
+"""
+
+
+SAFETY_GUARD = r"""
+import importlib.util, json, os, signal, subprocess, sys, time
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('runner', sys.argv[1])
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+root, case, target, number = Path(sys.argv[2]), sys.argv[3], sys.argv[4], int(sys.argv[5])
+fixture = root / 'safety-tree.py'
+mode = case if case in ('thread', 'termfork', 'exit125') else 'success'
+command = [sys.executable, str(fixture), str(root), mode]
+if case == 'cleanup125':
+    # Inject a teardown error only after real identity-safe cleanup. This proves
+    # error precedence without leaving survivors for the enclosing backup.
+    launcher = r'''
+import importlib.util, os, sys, time
+spec = importlib.util.spec_from_file_location('runner', sys.argv[1])
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+cleanup = runner.OwnedProcesses.cleanup
+def fail_after_cleanup(self):
+    cleanup(self)
+    raise RuntimeError('deliberate cleanup failure')
+runner.OwnedProcesses.cleanup = fail_after_cleanup
+try:
+    with runner.isolated_environment() as env:
+        os.environ.update(env)
+        status = runner.supervise(sys.argv[2:], timeout=3, deadline=time.monotonic()+3)
+    sys.exit(status)
+except (OSError, RuntimeError) as error:
+    print(error, file=sys.stderr)
+    sys.exit(125)
+'''
+    cli = [sys.executable, '-c', launcher, runner.__file__, *command]
+else:
+    cli = [sys.executable, runner.__file__, '--timeout', '3', '--', *command]
+proc = subprocess.Popen(cli)
+marker = 'root.json' if case in ('thread', 'termfork') else 'cleaning'
+deadline = time.monotonic() + 3
+while not (root / marker).exists() and proc.poll() is None and time.monotonic() < deadline:
+    time.sleep(.002)
+assert (root / marker).exists(), ('fixture never ready', case, proc.poll())
+pid = proc.pid
+if target == 'supervisor':
+    supervisors = runner.children(pid)
+    assert len(supervisors) == 1, supervisors
+    pid = supervisors.pop()
+# Late cases are gated by TERM from cleanup, after the command has exited.
+os.kill(pid, number)
+status = proc.wait(timeout=3)
+records = [json.loads(path.read_text()) for path in root.glob('*.json')]
+assert len(records) == (3 if case == 'termfork' else 2), records
+for data in records:
+    info = runner.process_info(data['pid'])
+    assert not (info and info[0] == data['identity']), ('owned identity survived BEFORE backup', data)
+    assert not Path(data['private']).exists(), ('private directory survived BEFORE backup', data)
+if case == 'thread':
+    assert (root / 'thread-term').exists(), 'non-main-thread child missed during TERM before adoption'
+expected = 125 if case in ('exit125', 'cleanup125') else 128 + number
+print(f'SAFETY {case}/{target}/{signal.Signals(number).name}: status={status}, expected={expected}; '
+      f'{len(records)} owned identities absent and private directory removed BEFORE backup', flush=True)
+assert status == expected, (case, target, status, expected)
+"""
+
+
+def safety_probes(runner, root, fake_pi):
+    failures = []
+    cases = [(case, 'caller', signal.SIGTERM) for case in ('thread', 'termfork')]
+    cases += [('late', target, sig) for target in ('caller', 'supervisor')
+              for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)]
+    cases += [(case, 'caller', signal.SIGTERM) for case in ('exit125', 'cleanup125')]
+    for index, (case, target, sig) in enumerate(cases):
+        directory = root / ('safety-' + str(index))
+        directory.mkdir()
+        (directory / 'safety-tree.py').write_text(SAFETY_TREE)
+        # A dedicated outer supervisor provides bounded fixture-only backup on
+        # assertion/readiness failure. The guard proves absence BEFORE it exits.
+        status = runner.run_owned([sys.executable, '-c', SAFETY_GUARD, runner.__file__,
+                                  str(directory), case, target, str(int(sig))], cwd=root,
+                                 env={**os.environ, 'PI_BIN': str(fake_pi)}, timeout=5)
+        if status != 0:
+            failures.append((case, target, sig.name, status))
+    assert not failures, failures
+    return len(cases)
+
+
 def self_test(runner):
     count = 0
     started = time.monotonic()
@@ -272,6 +417,7 @@ assert not Path(Path(str(record) + '.env').read_text()).parent.exists(), 'runner
                                     env={**os.environ, "PI_BIN": str(fake_pi), "EXPECTED_STATUS": str(expected)}, timeout=6) == 0
             assert_gone(record)
             count += 1
+        count += safety_probes(runner, root, fake_pi)
     print(f"isolated-check self-test: {count} checks passed in {time.monotonic() - started:.2f}s", flush=True)
 
 
