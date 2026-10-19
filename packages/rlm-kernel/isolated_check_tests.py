@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -37,9 +38,51 @@ def assert_gone(record):
     assert all(not Path(f"/proc/{pid}").exists() for pid in pids), pids
 
 
+def ownership_probe(runner):
+    """The spec-review discriminator, with backup cleanup only for this fixture."""
+    with tempfile.TemporaryDirectory(prefix="pi-vmk-spec-ownership-") as directory:
+        root = Path(directory)
+        record, gate = root / "child", root / "gate"
+        child_code = "import os,signal,time; from pathlib import Path; signal.signal(signal.SIGTERM,signal.SIG_IGN); Path(%r).write_text(str(os.getpid())); time.sleep(30)" % str(record)
+        parent_code = "import subprocess,sys,time; from pathlib import Path; subprocess.Popen([sys.executable,'-c',%r],start_new_session=True); gate=Path(%r);\nwhile not gate.exists(): time.sleep(.01)" % (child_code, str(gate))
+        with runner.subreaper():
+            unrelated = subprocess.Popen([sys.executable, "-c", parent_code], start_new_session=True)
+            child = None
+            identity = None
+            try:
+                deadline = time.monotonic() + 2
+                while not record.exists() and time.monotonic() < deadline:
+                    time.sleep(.01)
+                assert record.exists()
+                child = int(record.read_text())
+                identity = runner.process_info(child)[0]
+                owned_code = "from pathlib import Path; import time; Path(%r).touch(); time.sleep(.3)" % str(gate)
+                status = runner.run_owned([sys.executable, "-c", owned_code], cwd=root, env=dict(os.environ), timeout=2)
+                unrelated.wait(timeout=2)
+                info = runner.process_info(child)
+                alive = info is not None and info[0] == identity
+                print("OWNERSHIP: owned command status=%s; unrelated adopted grandchild survives=%s (required True)" % (status, alive), flush=True)
+                assert status == 0, status
+                assert alive, "runner killed a grandchild of an excluded, pre-existing unrelated process"
+                assert info[1] == os.getpid(), "fixture did not exercise adoption"
+            finally:
+                if unrelated.poll() is None:
+                    unrelated.kill()
+                unrelated.wait(timeout=2)
+                info = runner.process_info(child) if child else None
+                if info and info[0] == identity:
+                    os.kill(child, signal.SIGKILL)
+                    try:
+                        os.waitpid(child, 0)
+                    except ChildProcessError:
+                        pass
+
+
 def self_test(runner):
     count = 0
     started = time.monotonic()
+    ownership_probe(runner)
+    count += 1
     with tempfile.TemporaryDirectory(prefix="pi-isolated-self-test-") as directory:
         root = Path(directory)
         fake_pi = root / "fake-pi"
