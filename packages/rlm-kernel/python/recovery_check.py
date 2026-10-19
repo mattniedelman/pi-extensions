@@ -1,5 +1,6 @@
 import contextlib
 import io
+import importlib.util
 import json
 import os
 import stat
@@ -12,14 +13,19 @@ from unittest.mock import patch
 
 import sidecar
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent
 BOUNDARIES = ("raw-write", "names-write", "raw-replace", "names-replace")
 CHILD_TIMEOUT = 5
+spec = importlib.util.spec_from_file_location("isolated_runner", ROOT.parent / "isolated-check.py")
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
 
 
 def run_checks(command=None, *, timeout=20):
-    subprocess.run(command or [sys.executable, str(ROOT / "recovery_check.py")],
-                   check=True, timeout=timeout)
+    command = command or [sys.executable, str(ROOT / "recovery_check.py")]
+    status = runner.run_owned(command, cwd=ROOT, env=dict(os.environ), timeout=timeout)
+    if status:
+        raise subprocess.CalledProcessError(status, command)
 
 
 def contents(path):
@@ -41,10 +47,10 @@ def restored(state, expected_names, expected_x):
         {"id": 2, "code": "x"},
         {"id": 3, "operation": "shutdown"},
     ]
-    process = subprocess.run(
+    process = runner.run_owned_capture(
         [sys.executable, str(ROOT / "sidecar.py"), "--state", str(state)],
         input="".join(json.dumps(request) + "\n" for request in requests),
-        capture_output=True, text=True, timeout=CHILD_TIMEOUT,
+        cwd=ROOT, timeout=CHILD_TIMEOUT,
         env={**os.environ, "PI_RLM_MAX_MEMORY": "8000000"},
     )
     assert process.returncode == 0, process.stderr
@@ -60,11 +66,11 @@ def restored(state, expected_names, expected_x):
 
 def failed_response(state, boundary):
     # Exercise main()'s real JSONL error response too, not only Kernel.execute().
-    process = subprocess.run(
+    process = runner.run_owned_capture(
         [sys.executable, str(ROOT / "recovery_check.py"), "--failure-worker", str(state), boundary],
         input=json.dumps({"id": 1, "code": "x = 99\nnew_name = 'tiny'\nx"}) + "\n"
         + json.dumps({"id": 2, "operation": "shutdown"}) + "\n",
-        capture_output=True, text=True, timeout=CHILD_TIMEOUT,
+        cwd=ROOT, timeout=CHILD_TIMEOUT,
         env={**os.environ, "PI_RLM_MAX_MEMORY": "8000000"},
     )
     assert process.returncode == 0, process.stderr
@@ -110,6 +116,14 @@ def fail_at(boundary, state):
 
 
 class RecoveryChecks(unittest.TestCase):
+    def test_capture_streams(self):
+        # Keep the capture oracle in the default narrow/suite path, with its own
+        # backup scope rather than extending the original runner self-test.
+        status = runner.run_owned([sys.executable, str(ROOT.parent / "isolated_check_tests.py"),
+                                   runner.__file__, "--capture-only"],
+                                  cwd=ROOT, env=dict(os.environ), timeout=8)
+        self.assertEqual(status, 0)
+
     def test_stalled_workers(self):
         from recovery_timeout_check import check_timeouts
         check_timeouts(self)

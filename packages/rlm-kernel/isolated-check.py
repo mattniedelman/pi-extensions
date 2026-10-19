@@ -192,7 +192,7 @@ class OwnedProcesses:
         print(f"isolated-check cleanup: {len(self.observed)} owned PIDs observed, 0 survivors", file=sys.stderr, flush=True)
 
 
-def supervise(command, *, timeout, deadline):
+def supervise(command, *, timeout, deadline, stdin_fd=subprocess.DEVNULL):
     """Private entry point in a new interpreter, never in the caller process."""
     if children(os.getpid()):
         raise RuntimeError("supervisor must start without pre-existing children")
@@ -218,7 +218,7 @@ def supervise(command, *, timeout, deadline):
             finally:
                 os.close(fd)
             try:
-                proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=True)
+                proc = subprocess.Popen(command, stdin=stdin_fd, start_new_session=True)
             except FileNotFoundError as error:
                 print(f"isolated-check: {error}", file=sys.stderr)
                 return 127
@@ -248,8 +248,12 @@ def supervise(command, *, timeout, deadline):
     return 128 + interrupted if interrupted and status != 125 else status
 
 
-def run_owned(command, *, cwd, env, timeout):
-    """Keep unrelated caller subtrees outside a dedicated command supervisor."""
+def run_owned(command, *, cwd, env, timeout, stdin=None, stdout=None, stderr=None):
+    """Keep unrelated caller subtrees outside a dedicated command supervisor.
+
+    Optional streams are caller-owned files, not pipes: command output cannot
+    block the supervisor's discovery/deadline loop or wait on inherited EOF.
+    """
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be finite and positive")
     interrupted = 0
@@ -267,11 +271,13 @@ def run_owned(command, *, cwd, env, timeout):
         # Anonymous input avoids exposing commands in the supervisor argv or
         # blocking on a full pipe before signal/deadline handling is active.
         with tempfile.TemporaryFile(mode="w+") as request:
+            stdin_fd = stdin.fileno() if stdin is not None else subprocess.DEVNULL
             json.dump({"command": list(map(os.fspath, command)), "timeout": timeout,
-                       "deadline": deadline}, request)
+                       "deadline": deadline, "stdin_fd": stdin_fd}, request)
             request.seek(0)
             proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--_supervise"],
-                                    cwd=cwd, env=env, stdin=request, start_new_session=True)
+                                    cwd=cwd, env=env, stdin=request, stdout=stdout, stderr=stderr,
+                                    pass_fds=(stdin_fd,) if stdin is not None else (), start_new_session=True)
         forwarded = 0
         while proc.poll() is None:
             if interrupted and interrupted != forwarded:
@@ -300,6 +306,24 @@ def run_owned(command, *, cwd, env, timeout):
     # The caller can be interrupted after the supervisor has already exited
     # (too late to forward). Its own cancellation still wins, except for 125.
     return 128 + interrupted if interrupted and status != 125 else status
+
+
+def run_owned_capture(command, *, cwd, env, timeout, input=""):
+    """Capture tiny UTF-8 test protocols with the same ownership/status rules.
+
+    Anonymous files avoid pipe capacity and descendant-held EOF deadlocks.
+    stderr includes supervisor diagnostics; stdout contains only command output.
+    Read only after the supervisor has finished cleanup and closed its streams.
+    """
+    with tempfile.TemporaryFile() as stdin, tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        stdin.write(input.encode("utf-8"))
+        stdin.seek(0)
+        status = run_owned(command, cwd=cwd, env=env, timeout=timeout,
+                           stdin=stdin, stdout=stdout, stderr=stderr)
+        stdout.seek(0)
+        stderr.seek(0)
+        return subprocess.CompletedProcess(command, status, stdout.read().decode("utf-8", errors="replace"),
+                                           stderr.read().decode("utf-8", errors="replace"))
 
 
 def main():

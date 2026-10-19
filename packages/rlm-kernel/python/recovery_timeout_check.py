@@ -16,7 +16,7 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 STALLED = r'''
-import importlib.util, json, os, signal, sys
+import importlib.util, io, json, os, signal, sys
 from pathlib import Path
 sys.path.insert(0, ROOT)
 import sidecar
@@ -37,6 +37,11 @@ class StalledKernel(original):
 sidecar.Kernel = StalledKernel
 if len(sys.argv) > 1 and sys.argv[1] == '--failure-worker':
     sys.argv = [__file__, '--state', sys.argv[2]]
+elif len(sys.argv) > 1 and sys.argv[1] == '--guard-worker':
+    sys.argv = [__file__, '--state', sys.argv[2]]
+    # The enclosing runner intentionally gives commands EOF. Supply one real
+    # request here so the oracle stalls in Monty, not its best-effort close().
+    sys.stdin = io.StringIO(json.dumps({'id': 1, 'code': 'x'}) + '\n')
 sidecar.main()
 '''
 
@@ -63,10 +68,14 @@ def oracle(kind, directory):
                     recovery.failed_response(state, "raw-write")
                 else:
                     recovery.run_checks([sys.executable, str(directory / "sidecar.py"),
-                                         "--state", str(state)], timeout=.7)
+                                         "--guard-worker", str(state)], timeout=.7)
             except (subprocess.TimeoutExpired, subprocess.CalledProcessError, AssertionError) as error:
                 elapsed = time.monotonic() - started
                 assert .7 <= elapsed < 3, (kind, elapsed)
+                if isinstance(error, subprocess.CalledProcessError):
+                    assert error.returncode == 124, error
+                elif isinstance(error, AssertionError):
+                    assert "deadline exceeded" in str(error), error
                 records = json.loads(record.read_text())
                 surviving = [data for data in records if (info := runner.process_info(data['pid']))
                              and info[0] == data['identity']]

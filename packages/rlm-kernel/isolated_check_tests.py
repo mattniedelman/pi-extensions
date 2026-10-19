@@ -494,7 +494,6 @@ assert not Path(Path(str(record) + '.env').read_text()).parent.exists(), 'runner
             assert_gone(record)
             count += 1
         count += safety_probes(runner, root, fake_pi)
-    count += capture_probes(runner)
     print(f"isolated-check self-test: {count} checks passed in {time.monotonic() - started:.2f}s", flush=True)
 
 
@@ -504,6 +503,12 @@ if __name__ == "__main__":
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
     if sys.argv[2:] == ["--capture-only"]:
+        # Own these extra fixtures separately so the original 27-check group
+        # retains its existing 15s guard and no failing oracle leaks a child.
+        sys.exit(runner.run_owned([sys.executable, str(Path(__file__).resolve()),
+                                  str(Path(runner.__file__).resolve()), "--capture-oracle"],
+                                 cwd=Path.cwd(), env=dict(os.environ), timeout=7))
+    elif sys.argv[2:] == ["--capture-oracle"]:
         capture_probes(runner)
     else:
         self_test(runner)
