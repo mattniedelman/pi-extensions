@@ -81,7 +81,12 @@ replace the local checkout after separately approved publication.
 
 ### Verification boundary
 
-Retain working sidecar/client/bridge checks. Add a lightweight injected extension
+Retain working sidecar/client/bridge checks. Isolate the initial baseline before
+running it: every real-pi fixture owns its agent configuration, working directory,
+sessions, state, and process group. Cleanup must be bounded on success, EOF,
+assertion failure, and timeout; disabling Hindsight alone is not isolation.
+
+Add a lightweight injected extension
 harness for the registered callback and lifecycle/identity behavior, and a bounded
 real-pi no-model installation/discovery/cleanup test. Do not add a pi SDK runtime
 dependency merely to test the extension. Injected wiring tests do not establish
@@ -119,6 +124,23 @@ metadata are not a new general transactional database. Documentation and tests
 must distinguish guaranteed data behavior, convenience metadata, and unverified
 platform/version support. Initially claim only the tested Linux/pi 1.1.0 path;
 other platforms or later pi APIs require evidence rather than blanket assertions.
+
+## Independent design review
+
+The initial review found no Critical architecture flaw, but identified an actual
+checkpoint-write durability defect and Important verification gaps. A bounded
+file-failure probe showed that name-metadata failure after replacing the raw dump
+rolls back live memory while a fresh kernel restores the failed assignment.
+Production hardening must resolve this behavior and prove fresh-process recovery;
+the existing arithmetic rollback checks alone do not establish durable rollback.
+The raw-format change trigger below remains in force.
+
+The revised task graph puts isolated baseline execution first, explicitly tests
+checkpoint-write failures, and distinguishes installed registration from actual
+sidecar readiness. Live policy verification uses a controlled allow/deny hook
+with observable arguments and denial outcomes rather than successful nested
+execution events alone. These revisions remain inside the bead's existing scope.
+The design and revised task graph await the user's Ralph approval checkpoint.
 
 ## What would change this decision
 
