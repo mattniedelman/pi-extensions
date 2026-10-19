@@ -1,3 +1,9 @@
 packages/rlm-kernel/python/.venv/
 **/__pycache__/
 *.pyc
+# Raw dumps, convenience names, write staging and quarantine are sensitive.
+kernel.bin
+kernel.names.json
+kernel.names.tmp
+kernel.tmp
+kernel.corrupt

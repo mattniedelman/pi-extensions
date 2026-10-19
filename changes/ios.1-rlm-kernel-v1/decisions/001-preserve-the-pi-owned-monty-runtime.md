@@ -1,6 +1,6 @@
 # Preserve the pi-owned Monty runtime for v1
 
-- Status: Proposed production-hardening plan; existing runtime architecture retained
+- Status: Accepted; user approved the revised design and task graph
 - Date: 2026-10-19
 - Scope: `pi-extensions-ios.1`
 - Acceptance criteria and executable task plans: `bd show pi-extensions-ios.1`
@@ -15,10 +15,12 @@ proved retained source/log data, runtime reload, provider-backed compaction,
 process exit/resume, and session isolation. Their temporary harnesses are useful
 evidence, not a maintained test suite.
 
-The current source is still uncommitted development material and the user's
-personal installation points at its worktree. The v1 gap is reliable packaging,
-repeatable boundary tests, explicit support/recovery documentation, and a durable
-installation source—not another execution architecture.
+The original development sources, root test registration and ignore rules were
+captured at `26d404c`; no baseline recapture or runtime rewrite is needed. The
+user's personal development installation is intentionally unchanged. The v1 gap
+is reliable packaging, repeatable boundary tests, explicit support/recovery
+documentation, and a durable installation source -- not another execution
+architecture.
 
 ## Decision
 
@@ -26,8 +28,8 @@ installation source—not another execution architecture.
 
 Retain one extension-owned Python sidecar per pi session, with Monty 1.1.0 pinned
 by `python/pyproject.toml` and `uv.lock`. Sidecar lifetime follows `session_start`
-and idempotent `session_shutdown`; dependency bootstrap may start at session
-start. Keep the `python` tool model-only and retain its existing
+and idempotent `session_shutdown`; dependency bootstrap starts at `session_start`,
+not first tool use. Keep the `python` tool model-only and retain its existing
 `execute`, `variables`, `reset`, and `checkpoint` operations.
 
 All external capabilities resolve against the current callable pi tool context
@@ -45,8 +47,12 @@ skills, parallel calls, images, rich-object proxies, or pi-core changes.
 
 Keep state identity derived from the pi session file, with the existing
 working-directory/session-ID fallback for ephemeral sessions. Successful
-execution checkpoints the Monty state outside the transcript. Python state
-rolls back after failed execution; completed pi-tool side effects do not.
+execution checkpoints the Monty state outside the transcript. Python data
+rolls back after failed execution; completed pi-tool side effects do not. The raw
+dump commits last, after staging/replacing convenience-name metadata. If raw
+replacement fails, prior persisted data remains, but the names file may be
+discarded; a fresh kernel can have an empty `variables` list with prior data
+still available. Names are not complete introspection or a data-loss oracle.
 
 Keep `/tree` linear with respect to mutable kernel state: transcript navigation
 does not rewind variables. A different session file, including `/new`, `/fork`,
@@ -128,19 +134,28 @@ other platforms or later pi APIs require evidence rather than blanket assertions
 ## Independent design review
 
 The initial review found no Critical architecture flaw, but identified an actual
-checkpoint-write durability defect and Important verification gaps. A bounded
-file-failure probe showed that name-metadata failure after replacing the raw dump
-rolls back live memory while a fresh kernel restores the failed assignment.
-Production hardening must resolve this behavior and prove fresh-process recovery;
-the existing arithmetic rollback checks alone do not establish durable rollback.
-The raw-format change trigger below remains in force.
+checkpoint-write durability defect and Important verification gaps. At that
+review, a bounded file-failure probe showed that name-metadata failure after
+replacing the raw dump rolled back live memory while a fresh kernel restored the
+failed assignment. Task `pi-extensions-6th` fixed the ordering (metadata first, raw
+dump last), with failing-then-passing persisted-write/replace and fresh-process
+checks. The raw format is unchanged and the convenience-name limitation above is
+intentional. Independent spec and quality reviews approved the recovery work at
+`a167c4e`. The raw-format change trigger below remains in force.
 
 The revised task graph puts isolated baseline execution first, explicitly tests
 checkpoint-write failures, and distinguishes installed registration from actual
 sidecar readiness. Live policy verification uses a controlled allow/deny hook
 with observable arguments and denial outcomes rather than successful nested
 execution events alone. These revisions remain inside the bead's existing scope.
-The design and revised task graph await the user's Ralph approval checkpoint.
+An independent review passed the revised design/task graph, and the user
+approved it for autonomous local implementation and commits. Task
+`pi-extensions-vmk`'s isolated runner and `pi-extensions-6th`'s recovery work have
+completed independent spec and quality gates. This acceptance records those
+approvals, not completion of the remaining extension-boundary, distribution,
+installed-readiness, live-policy or final-suite tasks. Durable clone preparation
+is deferred to `pi-extensions-zog`; personal migration and publication remain
+unapproved.
 
 ## What would change this decision
 
