@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SidecarClient } from "./client.mjs";
+import { lifecycleChecks } from "./lifecycle-check.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = await mkdtemp(join(tmpdir(), "pi-rlm-client-"));
@@ -30,6 +31,7 @@ const onToolCall = async (name, args) => {
   return { content: `content:${name}`, structured: { name, args }, is_error: false };
 };
 try {
+  await lifecycleChecks(root);
   const natural = await client.request("execute", "doc = pi.read(path='a.txt')\ndoc['structured']['name']", undefined, onToolCall, tools);
   assert.equal(natural.result, "read");
   const exact = await client.request("execute", "pi.call('foo-bar', {'x': 1})['structured']['args']['x']", undefined, onToolCall, tools);
