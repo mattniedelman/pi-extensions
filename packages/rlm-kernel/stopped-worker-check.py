@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -21,12 +22,20 @@ spec.loader.exec_module(runner)
 
 def observe(mode, root, node):
     assert not runner.children(os.getpid()), "observer must start fresh"
+    interrupted = False
+
+    def on_signal(_number, _frame):
+        nonlocal interrupted
+        interrupted = True
+
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(number, on_signal)
     with runner.subreaper():
         proc = subprocess.Popen([node, str(HERE / "stopped-worker-probe.mjs"), mode, root])
         owned = runner.OwnedProcesses(proc)
         try:
             deadline = time.monotonic() + 10
-            while proc.poll() is None and time.monotonic() < deadline:
+            while proc.poll() is None and time.monotonic() < deadline and not interrupted:
                 owned.remaining()  # Discover positive child edges and reap only.
                 time.sleep(.005)
             deadline = time.monotonic() + .3
@@ -36,7 +45,7 @@ def observe(mode, root, node):
             print(f"OBSERVER BEFORE backup {mode}: " + json.dumps({
                 "status": proc.poll(), "observed": sorted(owned.observed),
                 "survivors": survivors}), flush=True)
-            status = 0 if proc.poll() == 0 and not survivors else 1
+            status = 0 if proc.poll() == 0 and not survivors and not interrupted else 1
         finally:
             owned.cleanup()
         return status
@@ -48,6 +57,12 @@ def main(node):
     sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     identity = runner.process_info(sentinel.pid)[0]
     children = []
+
+    def on_signal(_number, _frame):
+        raise InterruptedError("stopped-worker harness interrupted")
+
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(number, on_signal)
     try:
         with tempfile.TemporaryDirectory(prefix="pi-rlm-stopped-") as directory:
             root = Path(directory)
@@ -66,6 +81,8 @@ def main(node):
         assert not root.exists(), "private fixture root survived removal"
         print("rlm-kernel stopped Monty checks passed: 4/4; absence BEFORE backup; unrelated sentinel alive", flush=True)
     finally:
+        for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(number, signal.SIG_IGN)
         for child in children:
             if child.poll() is None:
                 child.terminate()

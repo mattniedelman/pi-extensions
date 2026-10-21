@@ -16,6 +16,19 @@ def info(pid):
 
 
 mode, record, state = sys.argv[1:]
+if mode == "restart":
+    previous = json.loads(Path(record).read_text())
+    for identity in [previous["uv"], previous["python"], *previous["workers"]]:
+        try:
+            current = info(identity["pid"])
+        except FileNotFoundError:
+            continue
+        assert current["start"] != identity["start"], "restart began before old tree retirement"
+    print("RESTART old UV/Python/Monty absent before new Kernel", file=sys.stderr, flush=True)
+    sys.argv = [__file__, "--state", state]
+    sidecar.main()
+    sys.exit(0)
+
 original = sidecar.Kernel
 
 
@@ -35,7 +48,9 @@ class StoppedKernel(original):
         while any(info(pid)["state"] != "T" for pid in workers):
             assert time.monotonic() < deadline, "worker did not stop"
             time.sleep(.005)
-        Path(record).write_text(json.dumps({"python": parent, "workers": [info(pid) for pid in workers]}))
+        temp = Path(record).with_suffix(".tmp")
+        temp.write_text(json.dumps({"python": parent, "workers": [info(pid) for pid in workers]}))
+        temp.replace(record)
         if mode != "request-timeout":
             while True:
                 time.sleep(.05)

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SidecarClient } from "./client.mjs";
@@ -32,20 +32,27 @@ const rejected = assert.rejects(request, mode === "startup-abort" ? /aborted/ : 
 rejected.catch(() => undefined);
 const failures = [];
 let tree;
+let recording = true;
 try {
   tree = await bounded((async () => {
-    while (true) {
+    while (recording) {
       try { return JSON.parse(await readFile(record, "utf8")); }
       catch (error) { if (error.code !== "ENOENT") throw error; }
       await delay(5);
     }
   })(), "stopped worker record", 1000);
   assert.equal(tree.python.parent, uv.pid, "Python must be a child of our uv");
+  assert.equal(uv.group, uv.pid, "uv must lead a private group");
+  assert.equal(uv.session, uv.pid, "uv must lead a private session");
+  assert.equal(tree.python.group, uv.group);
+  assert.equal(tree.python.session, uv.session);
   assert.equal((await info(uv.pid)).start, uv.start);
   assert.equal((await info(tree.python.pid)).start, tree.python.start);
   assert.ok(tree.workers.length);
   for (const worker of tree.workers) {
     assert.equal(worker.parent, tree.python.pid);
+    assert.equal(worker.group, uv.group);
+    assert.equal(worker.session, uv.session);
     assert.equal((await info(worker.pid)).start, worker.start);
     assert.equal((await info(worker.pid)).state, "T");
   }
@@ -58,16 +65,19 @@ try {
   await bounded(rejected, "meaningful request rejection", 1500);
   if (mode !== "startup-close") {
     // A failed old tree must retire before the next request can lazily start.
-    client.options.args = normalArgs;
+    await writeFile(record, JSON.stringify({ uv, ...tree }));
+    client.options.args = [...normalArgs.slice(0, 5), join(here, "python", "stopped_worker_fixture.py"), "restart", record, join(root, "kernel.bin")];
     const restart = client.request("execute", "40 + 2");
     restart.catch(() => undefined);
     const result = await bounded(restart, "real lazy restart", 4500);
     assert.equal(result.result, 42);
+    assert.match(client.stderr, /old UV\/Python\/Monty absent before new Kernel/);
     assert.notEqual(client.child.pid, uv.pid);
   }
 } catch (error) {
   failures.push(error.message);
 } finally {
+  recording = false;
   try { await bounded(client.close(), "final close", 4500); }
   catch (error) { failures.push(error.message); }
   // No backup signals here. The separate positive-ancestry subreaper owns that.

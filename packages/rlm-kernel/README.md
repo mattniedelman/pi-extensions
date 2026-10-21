@@ -83,6 +83,24 @@ paused while a nested pi tool is running. Output and encoded result text are
 capped at 4096 bytes each with a truncation indicator; error text is capped at
 8192 bytes. No intentional high-memory test is required to use the package.
 
+On the tested Linux target, the client starts each sidecar in a private process
+session/group and observes only its known descendant edges through `/proc`
+(including children created on other threads). Shutdown allows 2 seconds for
+normal exit or TERM, then escalates the owned group and observed escaped members
+to SIGKILL with a further 2-second deadline. Close and lazy restart wait for pipe
+closure and observed PID/start identities to disappear; unresolved cleanup is
+an error, not a successful restart. Callable pi tools run on pi's side of the
+bridge, outside this subprocess scope, and are not signaled by this cleanup.
+
+Real stopped Monty workers are covered by Linux regressions for startup timeout,
+startup abort, concurrent close and request timeout. This requires readable Linux
+`/proc` and OS reaping of orphaned exits. Other platforms' direct-child fallback
+is not a tested descendant-cleanup guarantee. Start-identity checks guard against
+stale observations, but Node's PID/group signals are not atomic pidfd operations.
+This is bounded cleanup of the supported uv/Python/Monty tree, not a general
+supervisor for arbitrary daemonizing programs: unobserved descendants escaping
+the private group and external SIGKILL of pi are not covered.
+
 ## State, privacy and compatibility
 
 The state root defaults to `~/.pi/agent/rlm`. Set `PI_RLM_STATE_DIR` explicitly to
