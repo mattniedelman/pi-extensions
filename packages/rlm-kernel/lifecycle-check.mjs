@@ -7,7 +7,7 @@ const rejects = (...args) => {
   check.catch(() => undefined); // A deadline can fail before backup cleanup settles it.
   return check;
 };
-async function bounded(promise, label, ms = 700) {
+export async function bounded(promise, label, ms = 700) {
   let timer;
   try {
     return await Promise.race([
@@ -46,8 +46,9 @@ export async function lifecycleChecks(cwd) {
       const child = track(client.child);
       const request = rejects(client.request("execute", "1"), /shutting down|exited/);
       await delay(20);
+      const queued = rejects(client.request("variables"), /shutting down/);
       await bounded(client.close(), "startup close");
-      await bounded(request, "startup request rejection");
+      await bounded(Promise.all([request, queued]), "startup and queued request rejection");
       await bounded(child.exit, "startup child exit");
       await rejects(client.request("execute", "2"), /shutting down/);
     }],
@@ -67,6 +68,7 @@ export async function lifecycleChecks(cwd) {
       const child = track(client.child);
       await bounded(rejects(client.request("execute", "1"), /startup timed out after 100ms/), "startup timeout");
       await bounded(child.exit, "startup timeout child exit", 3000);
+      assert.equal(child.child.signalCode, "SIGKILL", "stubborn startup must reach kill escalation");
       await bounded(client.close(), "timed out startup close");
     }],
     ["invalid JSON", async (make, track) => {
@@ -94,8 +96,15 @@ export async function lifecycleChecks(cwd) {
       const client = make("ready-stubborn", { requestTimeoutMs: 100 });
       const child = track(client.child);
       await bounded(rejects(client.request("execute", "1"), /request timed out after 100ms/), "request timeout");
-      await bounded(child.exit, "request timeout child exit", 3000);
+      client.options.args = ["-e", fake, "ready"];
+      const restarted = await bounded(client.request("variables"), "restart after timed out request", 3000);
+      const fresh = track(client.child);
+      assert.equal(child.exited, true, "restart must retire the prior child first");
+      assert.equal(child.child.signalCode, "SIGKILL", "stubborn request must reach kill escalation");
+      assert.equal(restarted.pid, fresh.child.pid);
+      assert.notEqual(fresh.child.pid, child.child.pid);
       await bounded(client.close(), "timed out request close");
+      await bounded(fresh.exit, "restarted timeout child exit");
     }],
     ["concurrent close waits for stubborn child", async (make, track) => {
       const client = make("ready-stubborn");
@@ -103,6 +112,7 @@ export async function lifecycleChecks(cwd) {
       await bounded(client.ready, "fixture ready");
       await bounded(Promise.all([client.close(), client.close()]), "concurrent close", 3000);
       assert.equal(child.exited, true, "close returned with its child still alive");
+      assert.equal(child.child.signalCode, "SIGKILL", "stubborn shutdown must reach kill escalation");
     }],
     ["active nested abort and lazy restart", async (make, track) => {
       const client = make("ready", { requestTimeoutMs: 40 });
@@ -121,12 +131,10 @@ export async function lifecycleChecks(cwd) {
       controller.abort();
       await bounded(rejected, "nested abort");
       await bounded(old.exit, "nested abort child exit");
-      const restarted = client.request("variables");
-      // run() advances from the sequential queue in a microtask.
-      await delay(0);
+      const restarted = await bounded(client.request("variables"), "lazy restart");
       const fresh = track(client.child);
       assert.notEqual(fresh.child.pid, old.child.pid);
-      assert.equal((await bounded(restarted, "lazy restart")).pid, fresh.child.pid);
+      assert.equal(restarted.pid, fresh.child.pid);
       finish({ content: "late", structured: null, is_error: false });
       await delay(20);
       assert.equal((await bounded(client.request("variables"), "after late tool result")).pid, fresh.child.pid);
