@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -16,16 +17,56 @@ import sidecar
 ROOT = Path(__file__).resolve().parent
 BOUNDARIES = ("raw-write", "names-write", "raw-replace", "names-replace")
 CHILD_TIMEOUT = 5
+RECOVERY_GROUPS = (
+    ("capture", 8, ("test_capture_streams",)),
+    ("checkpoint", 20, ("test_failed_checkpoint", "test_success_and_empty_names")),
+    ("stalled", 8, ("test_stalled_workers",)),
+)
+RESTORE_TIMINGS = []
+FAILURE_TIMINGS = []
 spec = importlib.util.spec_from_file_location("isolated_runner", ROOT.parent / "isolated-check.py")
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 
+def validate_groups():
+    # Pin the approved resource caps and assignment independently of dispatch
+    # metadata, so a deleted/duplicated group or method cannot silently pass.
+    expected = {
+        "capture": (8, ("test_capture_streams",)),
+        "checkpoint": (20, ("test_failed_checkpoint", "test_success_and_empty_names")),
+        "stalled": (8, ("test_stalled_workers",)),
+    }
+    if tuple(name for name, _, _ in RECOVERY_GROUPS) != tuple(expected):
+        raise ValueError("missing, duplicate, unknown or reordered recovery group")
+    for name, budget, methods in RECOVERY_GROUPS:
+        if (budget, methods) != expected[name]:
+            raise ValueError(f"invalid recovery budget or method assignment: {name}")
+    assigned = [method for _, _, methods in RECOVERY_GROUPS for method in methods]
+    actual = unittest.defaultTestLoader.getTestCaseNames(RecoveryChecks)
+    if sorted(assigned) != actual:
+        raise ValueError("recovery groups must cover every real method exactly once")
+
+
 def run_checks(command=None, *, timeout=20):
-    command = command or [sys.executable, str(ROOT / "recovery_check.py")]
-    status = runner.run_owned(command, cwd=ROOT, env=dict(os.environ), timeout=timeout)
-    if status:
-        raise subprocess.CalledProcessError(status, command)
+    if command is not None or timeout != 20:
+        # Preserve the explicit command/custom guard path used by planted stalls.
+        command = command or [sys.executable, str(ROOT / "recovery_check.py")]
+        status = runner.run_owned(command, cwd=ROOT, env=dict(os.environ), timeout=timeout)
+        if status:
+            raise subprocess.CalledProcessError(status, command)
+        return
+    validate_groups()
+    for name, budget, methods in RECOVERY_GROUPS:
+        command = [sys.executable, str(ROOT / "recovery_check.py"),
+                   *("RecoveryChecks." + method for method in methods)]
+        started = time.monotonic()
+        status = runner.run_owned(command, cwd=ROOT, env=dict(os.environ), timeout=budget)
+        if status:
+            raise subprocess.CalledProcessError(status, command)
+        print(f"rlm-kernel recovery group {name}: {len(methods)} methods passed, "
+              f"{time.monotonic() - started:.3f}s (guard {budget}s)", flush=True)
+    print("rlm-kernel recovery coverage passed: 3/3 groups, 4/4 methods", flush=True)
 
 
 def contents(path):
@@ -41,6 +82,7 @@ def live_x(kernel):
 
 
 def restored(state, expected_names, expected_x):
+    started = time.monotonic()
     # A separate interpreter must load the files before any successful checkpoint.
     requests = [
         {"id": 1, "operation": "variables"},
@@ -62,9 +104,11 @@ def restored(state, expected_names, expected_x):
     else:
         assert messages[2]["ok"] and messages[2]["result"]["result"] == expected_x, messages
     assert messages[3]["ok"], messages
+    RESTORE_TIMINGS.append(time.monotonic() - started)
 
 
 def failed_response(state, boundary):
+    started = time.monotonic()
     # Exercise main()'s real JSONL error response too, not only Kernel.execute().
     process = runner.run_owned_capture(
         [sys.executable, str(ROOT / "recovery_check.py"), "--failure-worker", str(state), boundary],
@@ -78,6 +122,7 @@ def failed_response(state, boundary):
     assert len(messages) == 3 and messages[0] == {"ready": True}, messages
     assert messages[1]["id"] == 1 and not messages[1]["ok"] and "Error" in messages[1]["error"], messages
     assert messages[2]["ok"], messages
+    FAILURE_TIMINGS.append(time.monotonic() - started)
 
 
 @contextlib.contextmanager
@@ -239,4 +284,19 @@ if __name__ == "__main__":
         with failure:
             sidecar.main()
     else:
-        unittest.main()
+        validate_groups()
+        selected = sys.argv[1:] or ["RecoveryChecks." + method
+                                    for _, _, methods in RECOVERY_GROUPS for method in methods]
+        program = unittest.main(exit=False, failfast=True)
+        if not program.result.wasSuccessful():
+            sys.exit(1)
+        assert program.result.testsRun == len(selected), "selected recovery method was not run"
+        if "RecoveryChecks.test_failed_checkpoint" in selected:
+            expected_restores = 28 if "RecoveryChecks.test_success_and_empty_names" in selected else 26
+            assert len(RESTORE_TIMINGS) == expected_restores, RESTORE_TIMINGS
+            assert len(FAILURE_TIMINGS) == 13, FAILURE_TIMINGS
+            print(f"rlm-kernel fresh-process restores passed: {len(RESTORE_TIMINGS)}/{expected_restores}; "
+                  f"failure responses passed: {len(FAILURE_TIMINGS)}/13", flush=True)
+            print(f"rlm-kernel recovery child timings: restores total {sum(RESTORE_TIMINGS):.3f}s "
+                  f"max {max(RESTORE_TIMINGS):.3f}s; failures total {sum(FAILURE_TIMINGS):.3f}s "
+                  f"max {max(FAILURE_TIMINGS):.3f}s (child guard {CHILD_TIMEOUT}s)", flush=True)

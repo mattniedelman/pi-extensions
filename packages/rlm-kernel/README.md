@@ -236,7 +236,37 @@ explicit deletion decision.
 
 ## Testing and scope
 
-Use the [root isolated testing commands](../../README.md#test). The default suite
+Focused verification commands from the repository root:
+
+```bash
+timeout 20s python3 -B packages/rlm-kernel/python/recovery_budget_tests.py
+PYTHONDONTWRITEBYTECODE=1 timeout 90s uv run --project packages/rlm-kernel/python --locked python packages/rlm-kernel/python/check.py
+timeout 90s python3 packages/rlm-kernel/isolated-check.py --timeout 85 -- uv run --project packages/rlm-kernel/python --locked python packages/rlm-kernel/python/check.py
+timeout 30s node packages/rlm-kernel/check.mjs
+timeout 15s node packages/rlm-kernel/bridge-check.mjs
+```
+
+Use private temporary state/venvs for direct checks (set `UV_PROJECT_ENVIRONMENT`
+and `PI_RLM_STATE_DIR`), not an active session's files. Real-pi checks must use
+`isolated-check.py` for private agent/cwd/session/state setup and owned cleanup.
+If locked dependencies need prewarming, bound that bootstrap separately; a
+cache-only `UV_OFFLINE=1` run fails when required dependencies are unavailable.
+
+Default recovery verification runs three independent owned groups: capture (8s),
+checkpoint failures plus successful/empty-name restores (20s), and stalled workers
+(8s). These are intentional aggregate resource caps, not a performance promise
+under varying CPU availability or permission for every child to consume its full
+5s deadline. The planted stalled-worker deadlines remain 0.7s. Each supervisor
+has its existing separate cleanup allowance; the isolated narrow command uses
+85s internally with a 90s outer TERM guard. Any group failure stops dispatch,
+without retries or catch-and-continue success. Output reports four executed
+methods, 13 failure scenarios, 28 fresh-process restores and bounded group/child
+timings. Passing these commands does not identify the cause of the earlier
+20s aggregate overrun.
+
+Use the [root isolated testing commands](../../README.md#test). The broader
+full-suite guard is unchanged and must be evaluated at the completion gate.
+ The default suite
 covers sidecar, bridge, client, checkpoint-write failures and real extension
 registration/cleanup without a paid provider. Structural package checks do not
 prove narrative semantics. Isolated installed-package readiness/removal and
