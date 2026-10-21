@@ -43,12 +43,15 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (!client) throw new Error("RLM kernel has not started");
       const operation = params.operation ?? "execute";
-      if (operation === "execute" && !params.code) throw new Error("code is required for execute");
+      if (operation === "execute" && (typeof params.code !== "string" || !params.code)) {
+        throw new Error("code is required for execute and must be a non-empty string");
+      }
       if (operation !== "execute") {
         const result = await client.request(operation, params.code, signal);
         return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
       }
-      if (!ctx?.executeTool) throw new Error("Nested pi tools are not available in this context");
+      if (typeof ctx?.executeTool !== "function") throw new Error("Nested pi tools are not available in this context");
+      if (!Array.isArray(ctx.tools)) throw new Error("Callable pi tools are not available in this context");
       const catalog = toolCatalog(pi, ctx);
       const result = await client.request(
         operation,
