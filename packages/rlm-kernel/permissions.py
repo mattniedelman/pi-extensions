@@ -204,7 +204,6 @@ def live_check(env, cwd, installed, selector):
     argv = [env["PI_BIN"], "--mode", "rpc", "--no-session", "--tools", "python,read",
             "--provider", provider, "--model", model_id, "--thinking", "off",
             "--extension", str(ROOT / "permissions-probe.mjs")]
-    compatibility = Path.home() / ".pi/agent/extensions/litellm-bedrock-compat.ts"
     # Explicit opt-in exact existing provider reference; no provider source copy.
     if env.get("PI_RLM_COMPAT_EXTENSION"):
         argv.extend(["--extension", env["PI_RLM_COMPAT_EXTENSION"]])
@@ -245,6 +244,19 @@ def live_check(env, cwd, installed, selector):
             assert_sensor(sensor.counts())
             print("permissions live PASS: " + json.dumps({**summary, "installedSidecars": len(sidecars),
                 "observedOwnedPIDs": len(owned.observed), "survivorsBeforeBackup": 0}, sort_keys=True), flush=True)
+        except BaseException:
+            stderr.seek(0)
+            diagnostic = stderr.read().decode(errors="replace")
+            # Only allowlisted diagnostic classifications, never raw provider stderr.
+            categories = [name for name, terms in {
+                "model-not-found": ("model not found", "no models available", "unknown provider"),
+                "credential-unavailable": ("no api key", "api key not found", "missing api key", "authentication"),
+                "extension-load-failure": ("failed to load extension", "cannot find module"),
+            }.items() if any(term in diagnostic.lower() for term in terms)]
+            print("permissions safe failure context: " + json.dumps({"exit": proc.poll(),
+                "categories": categories, "rpcEventTypes": sorted({e["type"] for e in rpc.events}),
+                "sensor": sensor.counts()}), file=sys.stderr, flush=True)
+            raise
         finally:
             owned.cleanup()
             rpc.close()
