@@ -19,8 +19,9 @@ spec.loader.exec_module(isolation)
 
 class Rpc:
     """Drain binary stdout on LF with real wall deadlines, never blocking readline."""
-    def __init__(self, proc):
+    def __init__(self, proc, owned):
         self.proc = proc
+        self.owned = owned
         self.selector = selectors.DefaultSelector()
         self.selector.register(proc.stdout, selectors.EVENT_READ)
         self.buffer = b""
@@ -28,6 +29,7 @@ class Rpc:
         self.eof = False
 
     def pump(self, deadline):
+        self.owned.remaining()  # reap owned adoptees while a command is still running
         if self.eof:
             raise RuntimeError(f"RPC EOF (exit={self.proc.poll()})")
         remaining = deadline - time.monotonic()
@@ -49,8 +51,11 @@ class Rpc:
                 raise RuntimeError("RPC protocol buffer limit exceeded")
 
     def request(self, request_id, request_type, timeout=10, **values):
-        self.proc.stdin.write(json.dumps({"id": request_id, "type": request_type, **values}).encode() + b"\n")
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write(json.dumps({"id": request_id, "type": request_type, **values}).encode() + b"\n")
+            self.proc.stdin.flush()
+        except BrokenPipeError as error:
+            raise RuntimeError(f"RPC stdin closed (exit={self.proc.poll()})") from error
         deadline = time.monotonic() + timeout
         while request_id not in self.responses:
             self.pump(deadline)
@@ -82,7 +87,7 @@ def protocol_checks(env, cwd):
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 start_new_session=True)
         owned = isolation.OwnedProcesses(proc)
-        rpc = Rpc(proc)
+        rpc = Rpc(proc, owned)
         started = time.monotonic()
         try:
             try:
@@ -102,7 +107,7 @@ def protocol_checks(env, cwd):
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             start_new_session=True)
     owned = isolation.OwnedProcesses(proc)
-    rpc = Rpc(proc)
+    rpc = Rpc(proc, owned)
     try:
         assert rpc.request("test", "get_state")["text"] == "a\u2028b"
     finally:
@@ -123,7 +128,7 @@ def pi_check(env, cwd, probe, output, mode, injected=False):
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr,
                                 start_new_session=True)
         owned = isolation.OwnedProcesses(proc)
-        rpc = Rpc(proc)
+        rpc = Rpc(proc, owned)
         try:
             assert rpc.request("state", "get_state")["success"] is True
             assert rpc.request("probe", "prompt", message="/probe-rlm")["success"] is True
@@ -131,7 +136,7 @@ def pi_check(env, cwd, probe, output, mode, injected=False):
             result = json.loads(output.read_text())
             assert "error" not in result, result
             if injected:
-                assert result["passed"] >= 3, result
+                assert result["passed"] == 24 and result["wiringOnly"] is True, result
             else:
                 assert result["name"] == "python" and result["exposure"] == "model-only", result
                 assert "pi.read" in result["description"], result
@@ -153,9 +158,11 @@ def pi_check(env, cwd, probe, output, mode, injected=False):
                 assert not owned.remaining(), "orderly pi shutdown left owned children BEFORE backup"
             else:
                 owned.cleanup()
-                assert all(isolation.process_info(pid) != (start, None) and
-                           (info := isolation.process_info(pid)) is None for pid, start in identities.items()), identities
-            print(f"real pi {mode}: {result}, 0 survivors", flush=True)
+                for pid, start in identities.items():
+                    info = isolation.process_info(pid)
+                    assert info is None or info[0] != start, (pid, start, info)
+            summary = result if injected else {"name": result["name"], "exposure": result["exposure"]}
+            print(f"real pi {mode}: {summary}, 0 survivors", flush=True)
         except BaseException:
             stderr.seek(0)
             print(stderr.read().decode(errors="replace"), file=sys.stderr)
@@ -172,7 +179,7 @@ def worker():
     # A fresh worker has no unrelated children. Reuse the proven positive-owned
     # tree/subreaping helper, with an outer owned supervisor as failure backup.
     with isolation.subreaper():
-        env = dict(os.environ)
+        env = {**os.environ, "UV_OFFLINE": "1"}
         cwd = Path.cwd()
         protocol_checks(env, cwd)
         output = cwd / "probe.json"
