@@ -28,7 +28,7 @@ import time
 
 
 @contextmanager
-def isolated_environment(source=None):
+def isolated_environment(source=None, *, discover_extensions=False):
     source = dict(os.environ if source is None else source)
     pi = shutil.which(source.get("PI_BIN", "pi"), path=source.get("PATH"))
     if pi is None:
@@ -53,8 +53,12 @@ def isolated_environment(source=None):
             "UV_PROJECT_ENVIRONMENT": str(root / "venv"), "PYTHONDONTWRITEBYTECODE": "1",
         })
         wrapper = root / "bin" / "pi"
-        flags = ["--offline", "--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates",
+        flags = ["--offline", "--no-mcp", "--no-skills", "--no-prompt-templates",
                  "--no-themes", "--no-context-files"]
+        # Opt-in only for private package-discovery oracles; all other checks
+        # retain explicit-extension-only loading and the same private resources.
+        if not discover_extensions:
+            flags.append("--no-extensions")
         wrapper.write_text(f"#!{sys.executable}\nimport os, sys\n" +
                            f"os.chdir({str(root / 'cwd')!r})\n" +
                            f"os.execv({pi!r}, [{pi!r}, *{flags!r}, *sys.argv[1:]])\n")

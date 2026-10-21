@@ -325,7 +325,7 @@ if __name__ == "__main__":
         worker(args.case, args.installed_root)
     else:
         selected = independent_source(args.installed_root) if args.installed_root else None
-        with isolation.isolated_environment() as env:
+        with isolation.isolated_environment(discover_extensions=True) as env:
             command = [sys.executable, str(Path(__file__).resolve()), "--_worker", "--case", args.case]
             if selected:
                 command.extend(["--installed-root", str(selected)])
