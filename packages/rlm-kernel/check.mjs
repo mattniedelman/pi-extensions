@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -33,6 +34,10 @@ const onToolCall = async (name, args) => {
   return { content: `content:${name}`, structured: { name, args }, is_error: false };
 };
 try {
+  const stopped = spawnSync("python3", [join(here, "stopped-worker-check.py"), process.execPath], {
+    stdio: "inherit", env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
+  assert.equal(stopped.status, 0, "real stopped-worker teardown regression");
   await lifecycleChecks(root);
   client = new SidecarClient({
     command: "uv",
