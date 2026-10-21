@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +17,33 @@ function observeChild() {
   children.push({ child, exit });
   return exit;
 }
+async function identity(pid) {
+  try {
+    const fields = (await readFile(`/proc/${pid}/stat`, "utf8")).split(")").at(-1).trim().split(/\s+/);
+    return { pid, start: fields[19], parent: Number(fields[1]) };
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ESRCH") return null;
+    throw error;
+  }
+}
+async function ownedTree(pid) {
+  const parent = await identity(pid);
+  assert.ok(parent, "real sidecar identity must exist before abort");
+  const descendants = new Set();
+  for (const task of await readdir(`/proc/${pid}/task`)) {
+    for (const child of (await readFile(`/proc/${pid}/task/${task}/children`, "utf8")).trim().split(/\s+/)) {
+      if (child) descendants.add(Number(child));
+    }
+  }
+  assert.equal((await identity(pid))?.start, parent.start);
+  const result = [parent];
+  for (const child of descendants) {
+    assert.equal((await identity(child))?.parent, pid);
+    result.push(...await ownedTree(child));
+  }
+  return result;
+}
+let slowStarted;
 const toolCalls = [];
 let effects = 0;
 const tools = [
@@ -27,7 +54,7 @@ const onToolCall = async (name, args) => {
   toolCalls.push({ name, args });
   if (name === "fail") return { content: "blocked", structured: null, is_error: true };
   if (name === "effect") { effects += 1; return { content: "changed", structured: null, is_error: false }; }
-  if (name === "slow") { await new Promise((resolve) => setTimeout(resolve, 150)); return { content: "late", structured: null, is_error: false }; }
+  if (name === "slow") { slowStarted?.(); await new Promise((resolve) => setTimeout(resolve, 150)); return { content: "late", structured: null, is_error: false }; }
   if (name === "__bridge_tools__") return { content: "", structured: tools, is_error: false };
   if (name === "__bridge_search__") return { content: "", structured: [{ name: "read" }], is_error: false };
   if (name === "__bridge_describe__") return { content: "", structured: { name: args.name }, is_error: false };
@@ -73,10 +100,20 @@ try {
   assert.equal(a.result, 1);
   assert.equal(b.result, 2);
   const nestedController = new AbortController();
+  const nestedStarted = new Promise((resolve) => { slowStarted = resolve; });
   const nestedInterrupted = client.request("execute", "pi.call('slow', {})", nestedController.signal, onToolCall, tools);
-  setTimeout(() => nestedController.abort(), 10);
-  await assert.rejects(nestedInterrupted, /aborted/);
-  assert.equal((await client.request("execute", "x", undefined, onToolCall, tools)).result, 2);
+  const nestedRejected = assert.rejects(nestedInterrupted, /aborted/);
+  nestedRejected.catch(() => undefined);
+  await bounded(nestedStarted, "real nested call started", 1000);
+  const oldTree = await ownedTree(client.child.pid);
+  assert.ok(oldTree.length >= 3, "observe real UV/Python/Monty before abort");
+  nestedController.abort();
+  await nestedRejected;
+  assert.equal((await bounded(client.request("execute", "x", undefined, onToolCall, tools), "real lazy restart under supervisor", 4500)).result, 2);
+  for (const old of oldTree) {
+    assert.notEqual((await identity(old.pid))?.start, old.start, "old identity must be absent before backup");
+  }
+  console.log(`REAL nested abort/lazy restart: ${oldTree.length} old identities absent BEFORE backup`);
   observeChild();
   await new Promise((resolve) => setTimeout(resolve, 400));
   assert.equal((await client.request("execute", "x", undefined, onToolCall, tools)).result, 2);

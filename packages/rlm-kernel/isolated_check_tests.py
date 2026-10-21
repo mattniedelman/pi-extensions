@@ -395,6 +395,79 @@ def capture_probes(runner):
     return count
 
 
+ACTIVE_REAP = r"""
+import importlib.util, json, os, signal, subprocess, sys, time
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('runner', sys.argv[1])
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+record = Path(sys.argv[2])
+child_code = '''
+import json, os, time
+from pathlib import Path
+for fd in (0, 1, 2): os.close(fd)
+identity = Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]
+Path(%r).write_text(json.dumps({'pid': os.getpid(), 'start': identity}))
+time.sleep(30)
+''' % str(record)
+parent_code = '''
+import subprocess, sys, threading, time
+from pathlib import Path
+def spawn():
+    subprocess.Popen([sys.executable, '-c', %r], start_new_session=True)
+    time.sleep(30)
+threading.Thread(target=spawn).start()
+while not Path(%r).exists(): time.sleep(.002)
+while not Path(%r).exists(): time.sleep(.002)
+''' % (child_code, str(record), str(record) + '.exit')
+parent = subprocess.Popen([sys.executable, '-c', parent_code])
+deadline = time.monotonic() + 2
+while not record.exists():
+    assert time.monotonic() < deadline, 'escaped child never ready'
+    time.sleep(.002)
+child = json.loads(record.read_text())
+pid, start = child['pid'], child['start']
+assert runner.process_info(pid) == (start, parent.pid)
+main_children = Path(f'/proc/{parent.pid}/task/{parent.pid}/children').read_text().split()
+assert str(pid) not in main_children, 'fixture did not use a creator thread'
+assert pid in runner.children(parent.pid), 'missing non-main-thread edge'
+assert os.getsid(pid) == pid and os.getpgid(pid) == pid
+assert all(not Path(f'/proc/{pid}/fd/{fd}').exists() for fd in (0, 1, 2))
+# Only the fixture parent is killed here; the child must remain alive on adoption.
+parent.kill()
+parent.wait(timeout=1)
+assert runner.process_info(pid) == (start, os.getppid()), 'not adopted by dedicated supervisor'
+os.kill(pid, signal.SIGKILL)
+deadline = time.monotonic() + 1
+while (info := runner.process_info(pid)) and info[0] == start:
+    assert time.monotonic() < deadline, ('active supervisor did not reap owned adoptee', pid, info)
+    time.sleep(.002)
+print('ACTIVE REAP: escaped thread/closed-pipes identity absent BEFORE root exit/backup', flush=True)
+raise SystemExit(7)
+"""
+
+
+def active_reaping_probe(runner):
+    with tempfile.TemporaryDirectory(prefix="pi-active-reap-") as directory:
+        root = Path(directory)
+        sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        identity = runner.process_info(sentinel.pid)[0]
+        try:
+            result = runner.run_owned_capture([sys.executable, "-c", ACTIVE_REAP, runner.__file__,
+                                               str(root / "child.json")], cwd=root,
+                                              env=dict(os.environ), timeout=4)
+            assert sentinel.poll() is None and runner.process_info(sentinel.pid)[0] == identity
+            assert result.returncode == 7, (result.returncode, result.stdout, result.stderr)
+            assert "absent BEFORE root exit/backup" in result.stdout
+            print(result.stdout, end="", flush=True)
+            print("ACTIVE REAP: root Popen status 7 preserved; unrelated sentinel alive", flush=True)
+        finally:
+            sentinel.terminate()
+            sentinel.wait(timeout=1)
+    assert not root.exists()
+    print("isolated-check active-reaping: 1 check passed", flush=True)
+
+
 def self_test(runner):
     count = 0
     started = time.monotonic()
@@ -510,5 +583,11 @@ if __name__ == "__main__":
                                  cwd=Path.cwd(), env=dict(os.environ), timeout=7))
     elif sys.argv[2:] == ["--capture-oracle"]:
         capture_probes(runner)
+    elif sys.argv[2:] == ["--active-only"]:
+        sys.exit(runner.run_owned([sys.executable, str(Path(__file__).resolve()),
+                                  str(Path(runner.__file__).resolve()), "--active-oracle"],
+                                 cwd=Path.cwd(), env=dict(os.environ), timeout=6))
+    elif sys.argv[2:] == ["--active-oracle"]:
+        active_reaping_probe(runner)
     else:
         self_test(runner)
