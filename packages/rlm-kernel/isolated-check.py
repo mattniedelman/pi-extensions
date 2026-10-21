@@ -30,7 +30,10 @@ import time
 @contextmanager
 def isolated_environment(source=None, *, discover_extensions=False):
     source = dict(os.environ if source is None else source)
-    pi = shutil.which(source.get("PI_BIN", "pi"), path=source.get("PATH"))
+    executable = source.get("PI_BIN", "pi")
+    if executable == source.get("_PI_ISOLATED_WRAPPER"):
+        executable = source["_PI_ISOLATED_EXECUTABLE"]
+    pi = shutil.which(executable, path=source.get("PATH"))
     if pi is None:
         raise RuntimeError("pi executable not found (set PI_BIN explicitly)")
     pi = str(Path(pi).resolve())
@@ -65,6 +68,10 @@ def isolated_environment(source=None, *, discover_extensions=False):
         wrapper.chmod(0o700)
         env["PATH"] = str(root / "bin") + os.pathsep + source.get("PATH", os.defpath)
         env["PI_BIN"] = str(wrapper)
+        # Fixture provenance for nesting: never wrap an earlier wrapper and
+        # inherit its explicit-only flags/cwd. Each level owns fresh resources.
+        env["_PI_ISOLATED_EXECUTABLE"] = pi
+        env["_PI_ISOLATED_WRAPPER"] = str(wrapper)
         yield env
 
 

@@ -515,6 +515,20 @@ def self_test(runner):
             assert result["argv"][-2:] == ["--extension", "/explicit/index.ts"]
             assert result["env"]["PI_CODING_AGENT_DIR"] == env["PI_CODING_AGENT_DIR"]
             count += 1
+            # Nested fixtures must replace wrapper flags and cwd, not inherit
+            # the outer explicit-only policy when private discovery is requested.
+            for discover in (False, True):
+                with runner.isolated_environment(env, discover_extensions=discover) as nested:
+                    nested_root = Path(nested["PI_CODING_AGENT_DIR"]).parent
+                    nested_report = root / f"nested-{discover}.json"
+                    assert runner.run_owned([nested["PI_BIN"], str(nested_report)], cwd=root, env=nested, timeout=2) == 0
+                    data = json.loads(nested_report.read_text())
+                    assert data["cwd"] == str(nested_root / "cwd")
+                    assert ("--no-extensions" in data["argv"]) is (not discover), data
+                    assert data["env"]["PI_CODING_AGENT_DIR"] == nested["PI_CODING_AGENT_DIR"]
+                    assert nested_root != private
+                assert not nested_root.exists()
+                count += 1
             # This sentinel is owned by the test, not the command under test.
             sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
             try:
