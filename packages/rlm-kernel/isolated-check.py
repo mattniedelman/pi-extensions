@@ -225,7 +225,10 @@ def supervise(command, *, timeout, deadline, stdin_fd=subprocess.DEVNULL):
             owned = OwnedProcesses(proc)
             try:
                 while True:
-                    owned.discover()
+                    # A live command may wait for killed descendants to vanish.
+                    # Reap owned adoptees now, not only after the root exits;
+                    # remaining() leaves root status/reaping to its Popen.
+                    owned.remaining()
                     if interrupted:
                         status = 128 + interrupted
                         break

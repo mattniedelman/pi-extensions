@@ -407,19 +407,19 @@ import json, os, time
 from pathlib import Path
 for fd in (0, 1, 2): os.close(fd)
 identity = Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]
-Path(%r).write_text(json.dumps({'pid': os.getpid(), 'start': identity}))
+record = Path(%r)
+record.with_suffix('.tmp').write_text(json.dumps({'pid': os.getpid(), 'start': identity}))
+record.with_suffix('.tmp').replace(record)
 time.sleep(30)
 ''' % str(record)
 parent_code = '''
 import subprocess, sys, threading, time
-from pathlib import Path
 def spawn():
     subprocess.Popen([sys.executable, '-c', %r], start_new_session=True)
     time.sleep(30)
 threading.Thread(target=spawn).start()
-while not Path(%r).exists(): time.sleep(.002)
-while not Path(%r).exists(): time.sleep(.002)
-''' % (child_code, str(record), str(record) + '.exit')
+time.sleep(30)
+''' % child_code
 parent = subprocess.Popen([sys.executable, '-c', parent_code])
 deadline = time.monotonic() + 2
 while not record.exists():
@@ -437,6 +437,7 @@ assert all(not Path(f'/proc/{pid}/fd/{fd}').exists() for fd in (0, 1, 2))
 parent.kill()
 parent.wait(timeout=1)
 assert runner.process_info(pid) == (start, os.getppid()), 'not adopted by dedicated supervisor'
+assert Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] != 'Z', 'child must outlive parent'
 os.kill(pid, signal.SIGKILL)
 deadline = time.monotonic() + 1
 while (info := runner.process_info(pid)) and info[0] == start:
