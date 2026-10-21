@@ -1,6 +1,18 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
+async function waitForExit(exit, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      exit.then(() => true),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export class SidecarClient {
   constructor(options) {
     this.options = { env: process.env, requestTimeoutMs: 10000, startupTimeoutMs: 120000, ...options };
@@ -14,15 +26,36 @@ export class SidecarClient {
   start() {
     const { command, args, cwd, env, startupTimeoutMs } = this.options;
     this.closed = false;
+    this.isReady = false;
     this.stderr = "";
     const child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     this.child = child;
+    const exit = new Promise((resolve) => child.once("close", resolve));
+    let termination;
+    this.stopChild = (graceful = false) => {
+      if (!termination) {
+        termination = (async () => {
+          if (graceful) {
+            child.stdin.write(`${JSON.stringify({ id: this.nextId++, operation: "shutdown" })}\n`);
+          } else {
+            child.kill();
+          }
+          if (!await waitForExit(exit, 2000)) {
+            child.kill("SIGKILL");
+            if (!await waitForExit(exit, 2000)) throw new Error("RLM kernel did not exit after SIGKILL");
+          }
+        })();
+        // Timer/abort handlers initiate cleanup; close/restart also await it.
+        termination.catch(() => undefined);
+      }
+      return termination;
+    };
     this.ready = new Promise((resolve, reject) => {
       this.readyResolve = resolve;
       this.readyReject = reject;
       this.readyTimer = setTimeout(() => {
-        reject(new Error(`RLM kernel startup timed out after ${startupTimeoutMs}ms`));
-        child.kill();
+        fail(new Error(`RLM kernel startup timed out after ${startupTimeoutMs}ms`));
+        this.stopChild();
       }, startupTimeoutMs);
     });
     this.ready.catch(() => undefined);
@@ -39,17 +72,20 @@ export class SidecarClient {
       }
       this.pending.clear();
     };
+    this.fail = fail;
 
     createInterface({ input: child.stdout }).on("line", (line) => {
+      if (this.child !== child || this.closed) return;
       let message;
       try {
         message = JSON.parse(line);
       } catch {
         fail(new Error(`RLM kernel returned invalid JSON: ${line.slice(0, 200)}`));
-        child.kill();
+        this.stopChild();
         return;
       }
       if (message.ready) {
+        this.isReady = true;
         clearTimeout(this.readyTimer);
         this.readyResolve();
         return;
@@ -94,40 +130,39 @@ export class SidecarClient {
   request(operation, code, signal, onToolCall, tools = []) {
     const run = async () => {
       if (this.stopping) throw new Error("RLM kernel is shutting down");
-      if (this.closed) this.start();
-      await this.ready;
-      if (signal?.aborted) throw new Error("RLM kernel request aborted");
-      const id = this.nextId++;
-      const response = new Promise((resolve, reject) => {
-        const request = {
-          resolve,
-          reject,
-          timer: undefined,
-          onToolCall,
-          armTimeout: () => {
-            clearTimeout(request.timer);
-            request.timer = setTimeout(() => {
-              this.pending.delete(id);
-              reject(new Error(`RLM kernel request timed out after ${this.options.requestTimeoutMs}ms`));
-              this.closed = true;
-              this.child.kill();
-            }, this.options.requestTimeoutMs);
-          },
-        };
-        request.armTimeout();
-        this.pending.set(id, request);
-      });
+      if (this.closed) {
+        await this.stopChild();
+        if (this.stopping) throw new Error("RLM kernel is shutting down");
+        this.start();
+      }
       const abort = () => {
-        const request = this.pending.get(id);
-        if (!request) return;
-        clearTimeout(request.timer);
-        this.pending.delete(id);
-        request.reject(new Error("RLM kernel request aborted"));
-        this.closed = true;
-        this.child.kill();
+        this.fail(new Error("RLM kernel request aborted"));
+        this.stopChild();
       };
       signal?.addEventListener("abort", abort, { once: true });
       try {
+        if (signal?.aborted) abort();
+        await this.ready;
+        if (this.stopping) throw new Error("RLM kernel is shutting down");
+        if (signal?.aborted) throw new Error("RLM kernel request aborted");
+        const id = this.nextId++;
+        const response = new Promise((resolve, reject) => {
+          const request = {
+            resolve,
+            reject,
+            timer: undefined,
+            onToolCall,
+            armTimeout: () => {
+              clearTimeout(request.timer);
+              request.timer = setTimeout(() => {
+                this.fail(new Error(`RLM kernel request timed out after ${this.options.requestTimeoutMs}ms`));
+                this.stopChild();
+              }, this.options.requestTimeoutMs);
+            },
+          };
+          request.armTimeout();
+          this.pending.set(id, request);
+        });
         this.child.stdin.write(`${JSON.stringify({ id, operation, code, tools })}\n`);
         return await response;
       } finally {
@@ -139,25 +174,12 @@ export class SidecarClient {
     return result;
   }
 
-  async close() {
-    if (this.stopping) return;
+  close() {
+    if (this.closing) return this.closing;
     this.stopping = true;
-    if (this.closed) return;
-    const exit = new Promise((resolve) => this.child.once("exit", resolve));
-    if (this.pending.size) {
-      this.child.kill();
-      await Promise.race([exit, new Promise((resolve) => setTimeout(resolve, 2000))]);
-      return;
-    }
-    try {
-      await this.ready;
-      const id = this.nextId++;
-      this.child.stdin.write(`${JSON.stringify({ id, operation: "shutdown" })}\n`);
-      await Promise.race([exit, new Promise((resolve) => setTimeout(resolve, 2000))]);
-    } catch {
-      // Shutdown remains best-effort; session teardown must not fail.
-    } finally {
-      if (!this.closed) this.child.kill();
-    }
+    const graceful = this.isReady && !this.closed && !this.pending.size;
+    this.fail(new Error("RLM kernel is shutting down"));
+    this.closing = this.stopChild(graceful);
+    return this.closing;
   }
 }
