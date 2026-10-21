@@ -55,7 +55,8 @@ From the repository root, with `pi`, Node, Python and `uv` on `PATH`:
 
 ```bash
 timeout 180s python3 packages/rlm-kernel/isolated-check.py --timeout 120 -- npm test
-python3 -B packages/rlm-kernel/package-check.py
+timeout 60s python3 packages/rlm-kernel/isolated-check.py --timeout 45 -- python3 -B packages/rlm-kernel/package-check.py
+timeout 20s python3 -B packages/rlm-kernel/package_check_tests.py
 ```
 
 The Linux isolation runner owns private agent configuration, working directory,
@@ -63,6 +64,13 @@ sessions, state, venvs, and bounded descendant cleanup; it does not load the
 personal installation or credentials. It reuses the uv dependency cache, so a
 cold cache can still require dependency downloads. No paid model test runs by
 default. The structural check verifies tracked/packed runtime and lock files,
-local documentation links, discovery metadata, host peers and file exclusions;
-it does not prove narrative correctness or installed sidecar readiness. Isolated
-installation/removal and opt-in paid lifecycle verification remain separate gates.
+local documentation links, discovery metadata, host peers and file exclusions.
+Registration accepts only the seven expected executable argv in order, joined by
+`&&`, with spaces or tabs between literal words. Quotes, comments, conditionals,
+redirection and other shell syntax fail closed; this is not a general shell parser.
+Intentional test-chain changes must update the checker contract. The retained
+registration regressions use private manifest copies and never execute mutated
+script text; npm artifact checks use private config files and cache.
+Structural checks do not prove narrative correctness or installed sidecar readiness.
+Isolated installation/removal and opt-in paid lifecycle verification remain
+separate gates.

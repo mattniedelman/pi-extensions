@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Check package/docs structure, not narrative accuracy or installed readiness."""
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 KERNEL = "packages/rlm-kernel/"
@@ -13,6 +15,7 @@ REQUIRED = {
     "package.json", "README.md", ADR,
     *(KERNEL + path for path in (
         "README.md", "index.ts", "client.mjs", "bridge.mjs", "package-check.py",
+        "package_check_tests.py",
         "python/sidecar.py", "python/pyproject.toml", "python/uv.lock",
         "python/check.py", "python/recovery_check.py", "python/recovery_timeout_check.py",
         "check.mjs", "bridge-check.mjs", "integration.py", "e2e.py",
@@ -21,11 +24,39 @@ REQUIRED = {
 }
 HOST_PACKAGES = {"@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "typebox"}
 STATE_FILES = ("kernel.bin", "kernel.names.json", "kernel.names.tmp", "kernel.tmp", "kernel.corrupt")
+# Only this literal executable chain is supported, not arbitrary shell syntax.
+TEST_ARGV = tuple(tuple(program.split()) for program in (
+    "node packages/bedrock-sso/inject.mjs",
+    "node packages/cache-status/stats.mjs",
+    "node packages/beads-reminder/detect.mjs",
+    "uv run --project packages/rlm-kernel/python --locked python packages/rlm-kernel/python/check.py",
+    "node packages/rlm-kernel/check.mjs",
+    "node packages/rlm-kernel/bridge-check.mjs",
+    "python3 packages/rlm-kernel/integration.py",
+))
 
 
 def command(*args):
-    return subprocess.run(args, cwd=ROOT, text=True, capture_output=True,
-                          check=True, timeout=30).stdout
+    # npm's user/global config and cache stay private even outside the pi runner.
+    with tempfile.TemporaryDirectory(prefix="pi-package-check-command-") as directory:
+        env = dict(os.environ)
+        if args[0] == "npm":
+            env = {key: value for key, value in env.items() if not key.lower().startswith("npm_")}
+            for name in ("userconfig", "globalconfig"):
+                config = Path(directory) / name
+                config.touch()
+                env["npm_config_" + name] = str(config)
+            env["npm_config_cache"] = directory
+        return subprocess.run(args, cwd=ROOT, env=env, text=True, capture_output=True,
+                              check=True, timeout=30).stdout
+
+
+def test_registration(script):
+    assert isinstance(script, str), "test registration: missing scripts.test command"
+    # Splitting horizontal whitespace preserves every shell metacharacter,
+    # quote and newline as a literal mismatch. Never evaluate the script text.
+    argv = tuple(tuple(re.split(r"[ \t]+", part.strip(" \t"))) for part in script.split("&&"))
+    assert argv == TEST_ARGV, "test registration: expected the seven executable argv in a simple && chain"
 
 
 def metadata():
@@ -36,8 +67,7 @@ def metadata():
     peers = package["peerDependencies"]
     assert all(peers.get(name) == "*" for name in HOST_PACKAGES), "host peers must use *"
     assert not HOST_PACKAGES.intersection(package.get("dependencies", {})), "host packages bundled"
-    for check in ("python/check.py", "check.mjs", "bridge-check.mjs", "integration.py"):
-        assert KERNEL + check in package["scripts"]["test"], f"test unregistered: {check}"
+    test_registration(package.get("scripts", {}).get("test"))
     return f"{len(entries)} extension entries; 3 host peers; 4 kernel test programs"
 
 
