@@ -239,12 +239,31 @@ explicit deletion decision.
 Focused verification commands from the repository root:
 
 ```bash
+HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm-kernel/integration.py --case installed
+HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm-kernel/integration.py --case installed --installed-root /absolute/path/to/independent/pi-extensions
 timeout 20s python3 -B packages/rlm-kernel/python/recovery_budget_tests.py
 PYTHONDONTWRITEBYTECODE=1 timeout 90s uv run --project packages/rlm-kernel/python --locked python packages/rlm-kernel/python/check.py
 timeout 90s python3 packages/rlm-kernel/isolated-check.py --timeout 85 -- uv run --project packages/rlm-kernel/python --locked python packages/rlm-kernel/python/check.py
 timeout 30s node packages/rlm-kernel/check.mjs
 timeout 15s node packages/rlm-kernel/bridge-check.mjs
 ```
+
+The installed selector uses private package settings and RLM-only resource filters,
+not `--extension` pointing at the original index. Without `--installed-root`, it
+copies the manifest and six runtime/lock files into an independent owned fixture.
+With the selector, it discovers the given independent package root in private
+settings; this is a reusable readiness oracle, not proof of install/list/remove
+(the separate distribution gate owns those CLI operations). It rejects original
+paths, symlink escapes and original-file aliases. The host-loaded probe imports
+that independent factory with a different session-file identity from the
+automatically loaded instance, explicitly closes it, and checks actual
+checkpoint/variables replies, 42/43 and a fresh-generation restore of 43. Evidence
+includes source path/inode, PID/start/parent identities and installed sidecar argv.
+Missing uv and a deliberately failing bootstrap process must reject checkpoint
+readiness with a diagnostic within 8 seconds; registration alone cannot pass.
+All cases assert no owned survivors before supervisor backup. Default integration
+still runs the 24 callback groups, five protocol checks and EOF/TERM/KILL, then
+these three installed cases. No model or personal settings are used.
 
 Use private temporary state/venvs for direct checks (set `UV_PROJECT_ENVIRONMENT`
 and `PI_RLM_STATE_DIR`), not an active session's files. Real-pi checks must use
