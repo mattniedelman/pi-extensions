@@ -1,16 +1,36 @@
 #!/usr/bin/env python3
+import argparse
 import json
 import os
 import subprocess
 import tempfile
 from pathlib import Path
 
-root = Path(__file__).parent
+root = Path(__file__).resolve().parent
+parser = argparse.ArgumentParser(description="Opt-in real-pi RLM checks")
+parser.add_argument("--case", choices=("resume", "permissions"), default="resume")
+parser.add_argument("--_worker", action="store_true", help=argparse.SUPPRESS)
+parser.add_argument("--model", help=argparse.SUPPRESS)
+args = parser.parse_args()
 pi = os.environ.get("PI_BIN", "pi")
-model = os.environ.get("PI_RLM_TEST_MODEL")
+model = args.model if args._worker else os.environ.get("PI_RLM_TEST_MODEL")
 if not model:
-    print("SKIP: set PI_RLM_TEST_MODEL=provider/model for live pi e2e")
+    print(f"SKIP: {args.case}: set PI_RLM_TEST_MODEL=provider/model for live pi e2e")
     raise SystemExit(0)
+if args.case == "permissions":
+    import permissions
+    try:
+        if args._worker:
+            permissions.worker(model)
+            status = 0
+        else:
+            status = permissions.run(model)
+    except BaseException as error:
+        # Never print raw provider errors, state/model dictionaries or secrets.
+        safe = str(error) if isinstance(error, AssertionError) and len(error.args) == 1 and isinstance(error.args[0], str) else type(error).__name__
+        print(f"permissions FAIL: {safe}", file=__import__("sys").stderr, flush=True)
+        status = 1
+    raise SystemExit(status)
 
 provider, model_id = model.split("/", 1)
 with tempfile.TemporaryDirectory(prefix="pi-rlm-e2e-") as directory:
