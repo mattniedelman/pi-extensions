@@ -165,21 +165,39 @@ implementation. Dedicated broader lifecycle verification remains a separate gate
 ## Installation
 
 The selected durable source is an ordinary, independent git clone at
-`~/.local/share/pi-extensions/rlm-kernel-v1`, checked out at the reviewed completed
-feature commit. Its preparation and installed-artifact verification are later
-rollout gates, not a claim that this directory already exists. No publication is
-needed. When preparing it intentionally, substitute the reviewed full commit ID
-and an existing local repository path:
+`~/.local/share/pi-extensions/rlm-kernel-v1`, checked out at a reviewed commit.
+Preparing this source does not install it into personal settings. The initial
+runtime preparation is pinned to reviewed `d61eb4fad3bc4f8579b85467c0ba7abca1085a69`;
+after the remaining policy/lifecycle gates, repin the clean clone to the final
+reviewed production HEAD. Do not describe the initial pin as completed v1.
+No publication is needed. When preparing it intentionally, substitute the
+reviewed full commit ID and an existing local repository path:
 
 ```bash
-git clone --no-local /absolute/path/to/local/pi-extensions "$HOME/.local/share/pi-extensions/rlm-kernel-v1"
+mkdir -p "$HOME/.local/share/pi-extensions"
+git clone --no-hardlinks /absolute/path/to/local/pi-extensions "$HOME/.local/share/pi-extensions/rlm-kernel-v1"
 git -C "$HOME/.local/share/pi-extensions/rlm-kernel-v1" checkout --detach <reviewed-full-commit-id>
 git -C "$HOME/.local/share/pi-extensions/rlm-kernel-v1" rev-parse HEAD
+```
+
+Only after separate personal-install approval:
+
+```bash
 pi install "$HOME/.local/share/pi-extensions/rlm-kernel-v1"
 pi list
 ```
 
 Use a previously nonexistent destination and verify the commit before installing.
+The preparation above ends at `rev-parse`: run `pi install`/`pi list` only after
+separate approval for personal installation/migration. If the destination already
+exists, classify its provenance and clean status before repinning; never overwrite
+unrelated data. `--no-hardlinks` copies local Git objects; confirm there is no
+`.git/objects/info/alternates`. Repinning after final review also requires a clean
+checkout. If the final commit is not already present, fetch it from the authorized
+local repository path (not a remote service): `git -C <durable-clone> fetch
+/absolute/path/to/local/pi-extensions <final-reviewed-full-commit-id>`. Then run
+`git -C <durable-clone> checkout --detach <final-reviewed-full-commit-id>` and
+`git -C <durable-clone> rev-parse HEAD`.
 A local pi package is loaded in place, not copied; keep this clone intact and
 unchanged. The clone is not a worktree or an alternate-object link to disposable
 storage. Pi 1.1.0 rejected direct `git:file://...` package installation; do not use
@@ -239,6 +257,7 @@ explicit deletion decision.
 Focused verification commands from the repository root:
 
 ```bash
+HINDSIGHT_DISABLED=true timeout 60s python3 packages/rlm-kernel/install-check.py
 HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm-kernel/integration.py --case installed
 HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm-kernel/integration.py --case installed --installed-root /absolute/path/to/independent/pi-extensions
 timeout 20s python3 -B packages/rlm-kernel/python/recovery_budget_tests.py
@@ -247,6 +266,29 @@ timeout 90s python3 packages/rlm-kernel/isolated-check.py --timeout 85 -- uv run
 timeout 30s node packages/rlm-kernel/check.mjs
 timeout 15s node packages/rlm-kernel/bridge-check.mjs
 ```
+
+`install-check.py` is an explicit distribution check, not an added default npm
+command. It clones the current committed HEAD twice with copied Git objects,
+detaches the independent installed checkout, verifies all six runtime/lock files
+and the manifest against committed blobs, and renames only its owned original
+fixture. Dirty/uncommitted runtime or original-file aliases fail. Actual pi
+install/list creates the private settings declaration; only then does an RLM-only
+resource filter narrow it. The same qwy readiness oracle proves automatic
+package discovery plus checkpoint/variables, 42/43 and fresh restore, and rejects
+real missing-uv and failed-bootstrap fixtures. Actual remove/list and a fresh
+no-model host then prove `python` absent and no observed owned child spawned.
+The real private checkpoint/names and planted quarantine/venv markers retain
+identical bytes/modes until deliberate owned-fixture cleanup. Every CLI command
+has an 8-second supervisor deadline, the worker has 50 seconds plus bounded
+cleanup, and the outer command has 60 seconds. No personal settings, paid model,
+real checkpoints or actual worktree rename is involved. A retained clone/state
+is not an uninstall failure; explicit cleanup is a separate destructive choice.
+
+For standalone packaging evidence, run `timeout 40s python3
+packages/rlm-kernel/package-check.py`: its artifact step invokes actual `npm pack
+--dry-run --json --ignore-scripts` with private npm config/cache and asserts
+required sidecar/project/lock/probe/check files, no generated venv/cache/state,
+unbundled host peers, and the unchanged strict default-test argv contract.
 
 The installed selector uses private package settings and RLM-only resource filters,
 not `--extension` pointing at the original index. Without `--installed-root`, it
@@ -285,11 +327,12 @@ timings. Passing these commands does not identify the cause of the earlier
 
 Use the [root isolated testing commands](../../README.md#test). The broader
 full-suite guard is unchanged and must be evaluated at the completion gate.
- The default suite
-covers sidecar, bridge, client, checkpoint-write failures and real extension
-registration/cleanup without a paid provider. Structural package checks do not
-prove narrative semantics. Isolated installed-package readiness/removal and
-opt-in event-based paid lifecycle checks are separate rollout gates.
+The default suite covers sidecar, bridge, client, checkpoint-write failures and
+real extension registration/cleanup without a paid provider. Structural package
+checks do not prove narrative semantics. Default integration proves installed
+readiness; the explicit distribution check also proves actual install/list/remove
+and private retention/cleanup. Opt-in paid lifecycle checks remain a separate
+completion gate.
 
 V1 does not load Python-backed skills, expose arbitrary host objects, provide
 full CPython, support image results or parallel tool calls, implement delegation

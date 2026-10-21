@@ -44,6 +44,28 @@ def committed_source(env, cwd, source, expected):
     return integration.independent_source(source)
 
 
+def source_negatives(env, cwd, installed, sha):
+    try:
+        integration.independent_source(REPO)
+    except AssertionError as error:
+        assert "independent" in str(error), error
+    else:
+        raise AssertionError("original worktree accepted as installed source")
+    path = installed / "packages/rlm-kernel/index.ts"
+    clean = path.read_bytes()
+    try:
+        path.write_bytes(clean + b"\n// owned dirty-source negative\n")
+        try:
+            committed_source(env, cwd, installed, sha)
+        except AssertionError as error:
+            assert "dirty installed checkout" in str(error), error
+        else:
+            raise AssertionError("uncommitted installed runtime accepted")
+    finally:
+        path.write_bytes(clean)
+    print("source negatives: 2/2 original root and uncommitted runtime rejected", flush=True)
+
+
 def removed_discovery(env, cwd):
     """Actual fresh host loadout must lack python and spawn no child at all."""
     probe = cwd / "removed-probe.ts"
@@ -99,6 +121,10 @@ def private_snapshot(paths):
 def worker():
     env = {**os.environ, "UV_OFFLINE": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
     cwd = Path.cwd()
+    # Pi dispatches package subcommands only when the verb is argv[1]. The
+    # session wrapper prepends resource flags, so use its resolved real binary
+    # for these verbs, retaining the same private env/cwd and supervisor.
+    installer = env["_PI_ISOLATED_EXECUTABLE"]
     settings = Path(env["PI_CODING_AGENT_DIR"]) / "settings.json"
     settings.write_text(json.dumps({"extensions": ["-builtin:mcp", "-builtin:llama.cpp",
                                                    "-builtin:codemode", "-builtin:tool-search"]}))
@@ -113,16 +139,19 @@ def worker():
         command(env, cwd, "git", "-C", installed, "checkout", "--detach", sha)
         command(env, cwd, "git", "-C", installed, "remote", "remove", "origin")
         installed = committed_source(env, cwd, installed, sha)
+        source_negatives(env, cwd, installed, sha)
         # Only our fixture source is renamed, never the real user worktree.
         original.rename(fixture / "unavailable-original")
         assert not original.exists()
         print(f"independent committed source: {sha}; original fixture unavailable", flush=True)
 
         # Actual installer must create this declaration before filtering it.
+        command(env, cwd, installer, "install", str(installed))
         packages = json.loads(settings.read_text()).get("packages", [])
-        assert packages == [str(installed)], f"actual installer declaration missing: {packages}"
-        listing = command(env, cwd, env["PI_BIN"], "list")
-        assert str(installed) in listing and str(original) not in listing, listing
+        assert len(packages) == 1 and isinstance(packages[0], str), f"actual installer declaration missing: {packages}"
+        assert (settings.parent / packages[0]).resolve() == installed, f"installer resolved wrong source: {packages}"
+        listing = command(env, cwd, installer, "list")
+        assert (str(installed) in listing or packages[0] in listing) and str(original) not in listing, listing
         configured = json.loads(settings.read_text())
         configured["packages"] = [{"source": packages[0], "extensions": ["+packages/rlm-kernel/index.ts"],
                                    "skills": [], "prompts": [], "themes": []}]
@@ -147,17 +176,22 @@ def worker():
             path.chmod(0o600)
         retained = [dump, names, quarantine, marker]
         snapshot = private_snapshot(retained)
-        command(env, cwd, env["PI_BIN"], "remove", str(installed))
-        assert not json.loads(settings.read_text()).get("packages"), "remove retained package declaration"
-        listing = command(env, cwd, env["PI_BIN"], "list")
-        assert str(installed) not in listing, listing
+        command(env, cwd, installer, "remove", str(installed))
+        after_remove = json.loads(settings.read_text())
+        assert not after_remove.get("packages"), "remove retained package declaration"
+        assert {key: value for key, value in after_remove.items() if key != "packages"} == {
+            key: value for key, value in configured.items() if key != "packages"}, "remove changed unrelated private settings"
+        listing = command(env, cwd, installer, "list")
+        assert not listing or (str(installed) not in listing and packages[0] not in listing), listing
         removed_discovery(env, cwd)
         assert private_snapshot(retained) == snapshot, "uninstall changed retained private data"
         committed_source(env, cwd, installed, sha)
         print("removal retention: 4/4 private checkpoint/names/quarantine/venv markers unchanged", flush=True)
         # Explicit destructive cleanup only after retention and no-child proof.
         for mode in ("ready", "missing-uv", "failed-bootstrap"):
-            shutil.rmtree(cwd / ("installed-" + mode))
+            case = cwd / ("installed-" + mode)
+            shutil.rmtree(case)
+            assert not case.exists(), "owned case root survived intentional cleanup"
         assert not any(path.exists() for path in retained)
         print("intentional owned cleanup: 4/4 retained files absent; 3/3 case roots absent", flush=True)
     assert not fixture.exists(), "owned clone fixture survived cleanup"
