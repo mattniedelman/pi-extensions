@@ -159,6 +159,18 @@ def sanitize(value):
     return result
 
 
+def contains_sentinel(value, sentinel):
+    """Check decoded observations, including keys discarded by sanitization."""
+    if isinstance(value, str):
+        return sentinel in value
+    if isinstance(value, dict):
+        return any(contains_sentinel(k, sentinel) or contains_sentinel(v, sentinel)
+                   for k, v in value.items())
+    if isinstance(value, list):
+        return any(contains_sentinel(item, sentinel) for item in value)
+    return False
+
+
 class ReadSensor:
     """Linux IN_ACCESS on actual fixture inodes, independent of tool results."""
     def __init__(self, paths):
@@ -232,7 +244,11 @@ class LiveRpc(integration.Rpc):
             while b"\n" in self.buffer:
                 line, self.buffer = self.buffer.split(b"\n", 1)
                 assert self.sentinel not in line, "denied sentinel exposed in RPC"
-                raw = json.loads(line)
+                try:
+                    raw = json.loads(line)
+                except (ValueError, UnicodeError):
+                    raise RuntimeError("RPC invalid JSON") from None
+                assert not contains_sentinel(raw, self.sentinel.decode()), "denied sentinel exposed in RPC"
                 self.failure_categories.update(failure_categories(raw))
                 message = sanitize(raw)
                 if message.get("type") == "response":
@@ -317,7 +333,9 @@ def live_check(env, cwd, installed, selector):
             response = rpc.request("permissions", "prompt", message=prompt)
             assert response["success"] is True and response["data"]["disposition"] == "started", "prompt not started"
             integration.wait_until(lambda: any(e["type"] == "agent_settled" for e in rpc.events), rpc, owned, timeout=55)
-            summary = verify(rpc, [json.loads(line) for line in policy.read_text().splitlines()], sensor.counts(), selector)
+            policy_events = [json.loads(line) for line in policy.read_text().splitlines()]
+            assert not contains_sentinel(policy_events, sentinel), "denied sentinel exposed in hook log"
+            summary = verify(rpc, policy_events, sensor.counts(), selector)
             # Installed sidecar argv, not a copied factory or original index loader.
             sidecars = []
             for pid in owned.remaining():
@@ -337,7 +355,9 @@ def live_check(env, cwd, installed, selector):
             assert not owned.remaining(), "owned children survived before backup"
             stderr.seek(0)
             assert sentinel.encode() not in stderr.read(), "denied sentinel exposed in stderr"
-            assert sentinel not in policy.read_text(), "denied sentinel exposed in hook log"
+            final_policy = policy.read_text()
+            assert sentinel not in final_policy and not contains_sentinel(
+                [json.loads(line) for line in final_policy.splitlines()], sentinel), "denied sentinel exposed in hook log"
             assert_sensor(sensor.counts())
             print("permissions live PASS: " + json.dumps({**summary, "installedSidecars": len(sidecars),
                 "observedOwnedPIDs": len(owned.observed), "survivorsBeforeBackup": 0}, sort_keys=True), flush=True)

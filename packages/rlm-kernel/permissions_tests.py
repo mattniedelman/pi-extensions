@@ -175,6 +175,30 @@ class Controls(unittest.TestCase):
                             rpc.close()
                             os.close(write_fd)
 
+    def test_actual_pump_retains_safe_records_and_decoded_hook_guard(self):
+        import secrets
+        import time
+        from types import SimpleNamespace
+        sentinel = "IUA_PRIVATE_" + secrets.token_hex(24)
+        read_fd, write_fd = os.pipe()
+        with os.fdopen(read_fd, "rb") as stdout:
+            rpc = permissions.LiveRpc(SimpleNamespace(stdout=stdout), SimpleNamespace(remaining=lambda: []), sentinel)
+            try:
+                records = [{"type": "response", "id": "state", "success": True,
+                            "data": {"model": {"provider": "litellm", "id": "fixture", "headers": {"private": "synthetic"}}}},
+                           {"type": "agent_settled", "aborted": False}]
+                os.write(write_fd, b"".join(json.dumps(record).encode() + b"\n" for record in records))
+                rpc.pump(time.monotonic() + 1)
+                self.assertTrue(rpc.responses["state"]["success"], "safe response lost")
+                self.assertTrue(rpc.responses["state"]["data"]["model"] == {"provider": "litellm", "id": "fixture"}, "sanitizer regression")
+                self.assertTrue(rpc.events == [{"type": "agent_settled", "aborted": False}], "safe event lost")
+                escaped_hook = json.dumps([{"input": {"path": sentinel}}]).replace(sentinel, "\\u%04x" % ord(sentinel[0]) + sentinel[1:])
+                self.assertTrue(permissions.contains_sentinel(json.loads(escaped_hook), sentinel), "decoded hook leak not detected")
+                self.assertFalse(permissions.contains_sentinel(records, sentinel), "safe records rejected")
+            finally:
+                rpc.close()
+                os.close(write_fd)
+
     def test_actual_pump_invalid_json_has_constant_safe_error(self):
         import secrets
         import time

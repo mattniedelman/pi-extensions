@@ -371,8 +371,10 @@ correlation, hook/result counts, error status and positive selected-model usage.
 Linux inode `IN_ACCESS` independently requires actual allowed access and zero
 denied access, distinguishing denial from post-execution redaction. A random
 denied sentinel unknown to the model is checked against RPC, stderr and the hook
-log without exposing its value. RPC sensitive fields and provider diagnostics
-are suppressed. Orderly EOF must leave zero owned survivors BEFORE supervisor
+log without exposing its value. RPC and hook JSON are checked recursively after
+decoding, including keys and fields that sanitization discards, so JSON escapes
+cannot hide a leak. RPC sensitive fields and provider diagnostics are suppressed.
+Orderly EOF must leave zero owned survivors BEFORE supervisor
 backup; all private fixture roots must be absent afterward. This narrow check
 proves nested permission denial, not the separate full lifecycle/RSS gate.
 
