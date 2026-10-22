@@ -35,8 +35,10 @@ export default function (pi) {
           if (!["python", "read"].every(name => tools.some(tool => tool.name === name))) throw Error("Replay tools missing");
           // No outbound request/response exists. Honor payload and stream instrumentation locally.
           await options?.onPayload?.({ replay: "fixed-python", request: requests }, model);
+          if (options?.signal?.aborted) throw Error("Replay aborted");
           const emit = async (event) => {
             await options?.onProviderStreamEvent?.({ replay: "fixed-python", type: event.type }, model);
+            if (options?.signal?.aborted) throw Error("Replay aborted");
             stream.push(event);
           };
           await emit({ type: "start", partial: message });

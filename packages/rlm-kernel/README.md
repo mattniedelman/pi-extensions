@@ -342,7 +342,22 @@ From the repository root:
 PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm-kernel/permissions_replay.py
 ```
 
-This standalone proof uses installed pi 1.1.0's normal agent loop with a tiny
+A focused stream-only regression is also available:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true timeout 20s python3 packages/rlm-kernel/permissions_replay.py --stream-test
+```
+
+Both commands first run 13 offline stream-contract checks through an isolated
+Pi command loader using the actual host pi-ai helper. Normal tool/text events
+must balance; pre-abort and cancellation inside awaited payload/start/content/
+terminal instrumentation must emit one `error/aborted`, no `done`, and close.
+Callback throws, missing tools and excess continuation must emit `error/error`.
+This focused check captures only the provider config and calls its local stream;
+it does not invoke a model, RLM callback or core tool hooks. It reuses the
+required replay artifact and owned cleanup, with no SDK dependency or new file.
+
+The full standalone proof uses installed pi 1.1.0's normal agent loop with a tiny
 local deterministic provider stream, `q1s-local-replay/fixed-python`. It is
 transport replay, NOT LLM inference or model-quality evidence. The test-only
 literal availability key is not a credential, and `local://q1s-no-network` is

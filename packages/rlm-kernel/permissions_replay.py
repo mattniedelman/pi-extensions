@@ -15,6 +15,137 @@ ROOT = Path(__file__).resolve().parent
 SELECTOR = "q1s-local-replay/fixed-python"
 CASES = ("good", "readBeforeDeny", "lostHook")
 
+# Loaded by Pi solely to acquire its real pi-ai stream helper; no agent/model call.
+STREAM_PROBE = """
+import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import factory from REPLAY_FACTORY;
+export default pi => pi.registerCommand("q1s-stream-test", {
+  description: "Offline local replay stream contract", handler: async () => {
+    const cases = [];
+    const context = { messages: [{ role: "system", content: "", timestamp: 0,
+      toolsAdded: ["python", "read"].map(name => ({ name, description: "fixture", parameters: {} })) }] };
+    const fresh = () => {
+      let config;
+      factory({ on() {}, registerProvider(name, value) {
+        assert.equal(name, "q1s-local-replay"); config = value;
+      } });
+      return { config, model: { ...config.models[0], provider: "q1s-local-replay", api: config.api } };
+    };
+    const collect = async (provider, options = {}, transcript = context) => {
+      const stream = provider.config.streamSimple(provider.model, transcript, options);
+      const events = [];
+      for await (const event of stream) events.push(structuredClone(event));
+      const result = await stream.result();
+      const terminal = events.filter(event => ["done", "error"].includes(event.type));
+      assert.equal(terminal.length, 1);
+      assert.equal(events.at(-1), terminal[0]);
+      assert.equal(stream.done, true);
+      assert.equal(result.stopReason, terminal[0].reason);
+      assert.equal(result.provider + "/" + result.model, "q1s-local-replay/fixed-python");
+      assert.deepEqual(Object.values(result.usage.cost), [0, 0, 0, 0, 0]);
+      assert.deepEqual(Object.entries(result.usage).filter(([key]) => key !== "cost").map(([, value]) => value), [0, 0, 0, 0, 0]);
+      return { events, result, terminal: terminal[0] };
+    };
+    const check = async (name, action) => {
+      try { const result = await action(); cases.push({ name, passed: true, ...result }); }
+      catch (error) { cases.push({ name, passed: false, error: error.message }); }
+    };
+    const normal = fresh();
+    for (const [name, block, reason] of [["normalTool", "toolcall", "toolUse"], ["normalText", "text", "stop"]]) {
+      await check(name, async () => {
+        const { events, result, terminal } = await collect(normal);
+        assert.deepEqual(events.map(event => event.type), ["start", block + "_start", block + "_delta", block + "_end", "done"]);
+        assert.equal(terminal.reason, reason);
+        assert.equal(result.content.length, 1);
+        if (block === "toolcall") assert.deepEqual(result.content[0].arguments, { code: process.env.PI_RLM_EXPECTED_CELL });
+        else assert.equal(result.content[0].text, "DONE");
+        return { terminal: terminal.type, reason, events: events.length, closed: true };
+      });
+    }
+    const faults = [
+      ["preAbort", "pre"], ["payloadAbort", "payload"], ["streamStartAbort", "start"],
+      ["toolStartAbort", "toolcall_start"], ["toolDoneAbort", "done"],
+      ["textStartAbort", "text_start", true], ["textDoneAbort", "done", true],
+      ["payloadThrow", "payloadThrow"], ["instrumentThrow", "instrumentThrow"],
+      ["missingTools", "missingTools"], ["thirdRequest", "thirdRequest"],
+    ];
+    for (const [name, fault, text] of faults) {
+      await check(name, async () => {
+        const provider = fault === "thirdRequest" ? normal : fresh();
+        if (text) await collect(provider);
+        const controller = new AbortController();
+        const observed = [];
+        if (fault === "pre") controller.abort();
+        const { events, result, terminal } = await collect(provider, {
+          signal: controller.signal,
+          onPayload: async () => {
+            await Promise.resolve();
+            if (fault === "payload") controller.abort();
+            if (fault === "payloadThrow") throw Error("fixture payload failure");
+          },
+          onProviderStreamEvent: async event => {
+            observed.push(event.type);
+            await Promise.resolve();
+            if (event.type === fault) controller.abort();
+            if (fault === "instrumentThrow") throw Error("fixture instrumentation failure");
+          },
+        }, fault === "missingTools" ? { messages: [] } : context);
+        const reason = name.endsWith("Abort") ? "aborted" : "error";
+        assert.equal(terminal.type, "error", name + " returned " + terminal.type + "/" + terminal.reason);
+        assert.equal(terminal.reason, reason);
+        assert.equal(events.some(event => event.type === "done"), false);
+        assert.equal(typeof result.errorMessage, "string");
+        if (["pre", "payload"].includes(fault)) assert.deepEqual(events.map(event => event.type), ["error"]);
+        if (controller.signal.aborted && observed.length) {
+          assert.equal(observed.at(-1), fault);
+          assert.equal(events.some(event => event.type === fault), false, "interrupted event was pushed");
+        }
+        return { terminal: terminal.type, reason, events: events.length, closed: true };
+      });
+    }
+    writeFileSync(process.env.PI_RLM_STREAM_OUTPUT, JSON.stringify(cases));
+  },
+});
+"""
+
+
+def stream_check(env, cwd):
+    probe, output = cwd / "stream-probe.ts", cwd / "stream-result.json"
+    probe.write_text(STREAM_PROBE.replace("REPLAY_FACTORY", json.dumps(str(ROOT / "permissions-replay-probe.ts"))))
+    argv = [env["PI_BIN"], "--mode", "rpc", "--no-session", "--extension", str(probe)]
+    with tempfile.TemporaryFile() as stderr:
+        proc = subprocess.Popen(argv, cwd=cwd,
+            env={**env, "PI_RLM_REPLAY_CASE": "good", "PI_RLM_EXPECTED_CELL": p.CELL,
+                 "PI_RLM_STREAM_OUTPUT": str(output)},
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, start_new_session=True)
+        owned = p.isolation.OwnedProcesses(proc)
+        rpc = p.integration.Rpc(proc, owned)
+        try:
+            assert rpc.request("state", "get_state")["success"] is True
+            assert rpc.request("probe", "prompt", message="/q1s-stream-test")["success"] is True
+            p.integration.wait_until(output.exists, rpc, owned)
+            cases = json.loads(output.read_text())
+            proc.stdin.close()
+            proc.wait(timeout=5)
+            assert proc.returncode == 0, "stream probe host failed"
+            assert not owned.remaining(), "stream probe survivors BEFORE backup"
+            print("stream host: exit0; 0 survivors BEFORE backup", flush=True)
+            print("replay stream contract: " + json.dumps(cases, sort_keys=True), flush=True)
+            assert len(cases) == 13 and all(case["passed"] for case in cases), "replay stream contract failure"
+        finally:
+            stderr.seek(0)
+            print(stderr.read().decode(errors="replace"), end="", file=sys.stderr)
+            owned.cleanup()
+            rpc.close()
+            if not proc.stdin.closed:
+                proc.stdin.close()
+            proc.stdout.close()
+            probe.unlink(missing_ok=True)
+            output.unlink(missing_ok=True)
+    assert not p.isolation.children(os.getpid()), "stream probe children survived finally"
+    print("stream finally: 0 owned children; loader/results absent; 13/13 contract checks PASS", flush=True)
+
 
 def replay_case(env, cwd, installed, case):
     (cwd / "policy.jsonl").unlink(missing_ok=True)
@@ -57,6 +188,7 @@ def worker():
     cwd = Path.cwd()
     command = lambda *argv: p.installation.command(env, cwd, *argv)
     with p.isolation.subreaper(), tempfile.TemporaryDirectory(prefix="pi-q1s-source-") as directory:
+        stream_check(env, cwd)
         fixture = Path(directory)
         original, installed = fixture / "original", fixture / "installed"
         sha = command("git", "-C", p.installation.REPO, "rev-parse", "HEAD")
@@ -89,7 +221,7 @@ def worker():
     print("replay owned committed source fixtures: absent", flush=True)
 
 
-def run():
+def run(*, stream_only=False):
     # Outside all dedicated ownership supervisors: it must never be signaled.
     with tempfile.TemporaryDirectory(prefix="pi-q1s-unrelated-") as directory:
         root = Path(directory)
@@ -100,8 +232,9 @@ def run():
             assert sentinel.stdout.readline() == "ready\n", "unrelated sentinel not ready"
             with p.isolation.isolated_environment(discover_extensions=True) as env:
                 agent = Path(env["PI_CODING_AGENT_DIR"])
-                result = p.isolation.run_owned_capture([sys.executable, str(ROOT / "permissions_replay.py"), "--_worker"],
-                    cwd=agent.parent / "cwd", env=env, timeout=36)
+                result = p.isolation.run_owned_capture([sys.executable, str(ROOT / "permissions_replay.py"),
+                    "--_stream-worker" if stream_only else "--_worker"],
+                    cwd=agent.parent / "cwd", env=env, timeout=14 if stream_only else 36)
             print(result.stdout, end="")
             print(result.stderr, end="", file=sys.stderr)
             assert not agent.parent.exists(), "private agent/cwd/state/session root survived"
@@ -118,9 +251,13 @@ if __name__ == "__main__":
     try:
         if sys.argv[1:] == ["--_worker"]:
             worker()
+        elif sys.argv[1:] == ["--_stream-worker"]:
+            assert not p.isolation.children(os.getpid()), "stream worker must start child-free"
+            with p.isolation.subreaper():
+                stream_check(dict(os.environ), Path.cwd())
         else:
-            assert not sys.argv[1:], "unsupported replay argv"
-            sys.exit(run())
+            assert sys.argv[1:] in ([], ["--stream-test"]), "unsupported replay argv"
+            sys.exit(run(stream_only=bool(sys.argv[1:])))
     except Exception as error:
         print("permissions replay failure: " + p.safe_error_type(error), file=sys.stderr, flush=True)
         sys.exit(1)
