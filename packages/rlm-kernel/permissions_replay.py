@@ -112,7 +112,7 @@ def run():
             sentinel.terminate()
             sentinel.wait(timeout=2)
             sentinel.stdout.close()
-    
+
 
 if __name__ == "__main__":
     try:

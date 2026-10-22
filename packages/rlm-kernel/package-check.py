@@ -20,6 +20,7 @@ REQUIRED = {
         "python/check.py", "python/recovery_check.py", "python/recovery_timeout_check.py",
         "check.mjs", "bridge-check.mjs", "integration.py", "e2e.py",
         "permissions.py", "permissions_tests.py", "permissions_assembly_tests.py", "permissions-probe.mjs",
+        "permissions_replay.py", "permissions-replay-probe.ts",
         "install-check.py", "index-probe.ts", "installed-probe.ts",
         "isolated-check.py", "isolated_check_tests.py",
     )),

@@ -334,6 +334,52 @@ readiness; the explicit distribution check also proves actual install/list/remov
 and private retention/cleanup. Opt-in paid lifecycle checks remain a separate
 completion gate.
 
+## No-inference real-pi permission replay
+
+From the repository root:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm-kernel/permissions_replay.py
+```
+
+This standalone proof uses installed pi 1.1.0's normal agent loop with a tiny
+local deterministic provider stream, `q1s-local-replay/fixed-python`. It is
+transport replay, NOT LLM inference or model-quality evidence. The test-only
+literal availability key is not a credential, and `local://q1s-no-network` is
+never contacted. No configured provider package, user model/auth copies, paid
+requests or syscall tracing are used. All usage and cost fields must be zero;
+exactly two assistant responses (`toolUse`, then `stop`) are required. The live
+oracle's positive-usage check is unchanged and rejects these zero-usage messages.
+
+The existing isolation/install helpers create private agent/cwd/session/state
+fixtures, actually install an independent committed clone with copied objects,
+filter discovery to RLM only, and make the owned original clone unavailable.
+The replay loader does not import or replace the RLM factory or builtin read.
+It emits the exact `permissions.CELL` as one provider tool call; pi core invokes
+the actual installed Python callback with its real tool context, owns nested
+read execution and IDs, and dispatches the real permission hooks. No execution
+or hook events are manually emitted. The existing 36-check collector retains
+all execution, argument, parent-ID, result-envelope, hook, privacy, cumulative
+inode-sensor and cleanup checks; only the replay-specific zero-inference check
+replaces positive model usage for this command.
+
+Three real-pi cases run once: good (36/36 PASS), read-before-denial (expected
+strict FAIL from actual discarded denied-file IO), and lost enforcement
+(expected strict FAIL from the actual builtin denied read, privacy and result
+checks). The reporter never prints the unique denied sentinel or arbitrary
+arguments. Cumulative startup/before-prompt/after-settled/final-shutdown sensor
+counts are never reset. Each case requires orderly EOF and zero owned survivors
+BEFORE backup, then zero children after finally cleanup. Private source/config/
+state roots must be absent afterward; an unrelated caller sentinel must remain
+alive. The worker has a 36-second deadline inside the 45-second outer guard.
+This is fixture isolation, not an OS security sandbox.
+
+Passing replay does not attribute or fix the historical live denied-access
+observation (9072, denied count 1), or the unexplained synthetic positive
+failures. It does not complete ios.1 or replace the separately gated full
+lifecycle/RSS, paid-policy or final durable-repin checks. Default npm test and
+the strict default-test argv contract remain unchanged.
+
 ## Opt-in live permission check
 
 The credential-free assembly regression is a separate narrow command:

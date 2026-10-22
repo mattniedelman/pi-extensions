@@ -49,6 +49,38 @@ class DiagnosticControls(unittest.TestCase):
                   "finalShutdown": {"allowed.txt": 1, "denied.txt": 0}}
         return rpc, policy, phases
 
+    def test_replay_zero_usage_never_satisfies_live_guard(self):
+        rpc, policy, phases = self.fixture()
+        first = rpc.events[6]["message"]
+        first.update(provider="q1s-local-replay", model="fixed-python", stopReason="toolUse",
+            usage={"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+                   "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}})
+        import copy
+        second = copy.deepcopy(first)
+        second["stopReason"] = "stop"
+        rpc.events.insert(-1, {"type": "message_end", "message": second})
+        selector = "q1s-local-replay/fixed-python"
+        report = permissions.verify(rpc, policy, phases, selector, replay=True)
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["checks"]["replay_zero_inference"], "PASS")
+        self.assertNotIn("model_usage", report["checks"])
+        live = permissions.verify(rpc, policy, phases, selector)
+        self.assertFalse(live["passed"])
+        self.assertEqual(live["checks"]["model_usage"], "FAIL")
+        for key, invalid in (("input", 1), ("totalTokens", -1), ("totalTokens", False), ("output", None)):
+            with self.subTest(key=key, invalid=invalid):
+                clean = first["usage"][key]
+                first["usage"][key] = invalid
+                self.assertEqual(permissions.verify(rpc, policy, phases, selector, replay=True)
+                    ["checks"]["replay_zero_inference"], "FAIL")
+                first["usage"][key] = clean
+        first["usage"]["cost"]["total"] = 1
+        self.assertFalse(permissions.verify(rpc, policy, phases, selector, replay=True)["passed"])
+        first["usage"]["cost"]["total"] = 0
+        self.assertFalse(permissions.verify(rpc, policy, phases, "litellm/fixture", replay=True)["passed"])
+        rpc.events.pop(-2)
+        self.assertFalse(permissions.verify(rpc, policy, phases, selector, replay=True)["passed"])
+
     def test_sensor_failure_does_not_abort_independent_checks(self):
         rpc, policy, phases = self.fixture()
         phases["afterSettled"]["denied.txt"] = phases["finalShutdown"]["denied.txt"] = 1

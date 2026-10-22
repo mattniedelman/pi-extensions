@@ -328,7 +328,7 @@ def assert_report(report):
     assert report["passed"], "permissions invariant failure"
 
 
-def verify(rpc, policy, phases, selector):
+def verify(rpc, policy, phases, selector, *, replay=False):
     """Collect independent, bounded outcomes; never return uncontrolled observations."""
     events = [e for e in rpc.events if isinstance(e, dict)]
     settled = [e for e in events if e.get("type") == "agent_settled"]
@@ -390,7 +390,17 @@ def verify(rpc, policy, phases, selector):
             if isinstance(m.get("provider"), str) and isinstance(m.get("model"), str))
             and all(isinstance(m.get("provider"), str) and isinstance(m.get("model"), str) for m in assistants),
         "model_status": bool(assistants) and all(m.get("stopReason") in ("stop", "toolUse") for m in assistants),
-        "model_usage": usage["totalTokens"] > 0,
+        # Live proof still requires positive paid usage. Replay is a distinct,
+        # fixed local transport with exactly two responses and no inference.
+        ("replay_zero_inference" if replay else "model_usage"): (
+            selector == "q1s-local-replay/fixed-python" and len(assistants) == 2
+            and [m.get("stopReason") for m in assistants] == ["toolUse", "stop"]
+            and all(isinstance(m.get("usage"), dict)
+                and all(type(m["usage"].get(k)) is int and m["usage"][k] == 0 for k in usage)
+                and isinstance(m["usage"].get("cost"), dict)
+                and all(type(m["usage"]["cost"].get(k)) in (int, float) and m["usage"]["cost"][k] == 0
+                    for k in ("input", "output", "cacheRead", "cacheWrite", "total")) for m in assistants)
+            if replay else usage["totalTokens"] > 0),
         "rpc_privacy": rpc.privacy_ok,
         "rpc_protocol": rpc.protocol_ok,
         "rpc_event_types": all(isinstance(e.get("type"), str) and e["type"] in EVENT_TYPES for e in events),
@@ -550,7 +560,7 @@ def live_check(env, cwd, installed, selector, *, replay=False):
             guards["hook_privacy"] = privacy_ok
             guards["hook_protocol"] = protocol_ok
             guards["observation_errors"] = not errors
-            report = verify(rpc, policy_events, phases, selector)
+            report = verify(rpc, policy_events, phases, selector, replay=replay)
             report["checks"].update({name: "PASS" if ok else "FAIL" for name, ok in guards.items()})
             report.update({"passed": all(value == "PASS" for value in report["checks"].values()),
                 "installedSidecars": len(sidecars), "observedOwnedPIDs": len(owned.observed),
