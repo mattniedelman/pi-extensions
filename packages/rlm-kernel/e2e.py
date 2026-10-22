@@ -27,7 +27,7 @@ if args.case == "permissions":
             status = permissions.run(model)
     except BaseException as error:
         # Never print raw provider errors, state/model dictionaries or secrets.
-        safe = str(error) if isinstance(error, AssertionError) and len(error.args) == 1 and isinstance(error.args[0], str) else type(error).__name__
+        safe = "permissions invariant failure" if isinstance(error, AssertionError) else permissions.safe_error_type(error)
         print(f"permissions FAIL: {safe}", file=__import__("sys").stderr, flush=True)
         status = 1
     raise SystemExit(status)

@@ -5,6 +5,7 @@ import ctypes
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import stat
@@ -224,9 +225,46 @@ class LiveRpc(integration.Rpc):
         self.sentinel = sentinel.encode()
         self.total_bytes = 0
         self.failure_categories = set()
+        self.privacy_ok = True
+        self.protocol_ok = True
+
+    def records(self):
+        while b"\n" in self.buffer:
+            line, self.buffer = self.buffer.split(b"\n", 1)
+            if self.sentinel in line:
+                self.privacy_ok = False
+                raise AssertionError("denied sentinel exposed in RPC")
+            try:
+                raw = json.loads(line)
+            except (ValueError, UnicodeError):
+                self.protocol_ok = False
+                raise RuntimeError("RPC invalid JSON") from None
+            if contains_sentinel(raw, self.sentinel.decode()):
+                self.privacy_ok = False
+                raise AssertionError("denied sentinel exposed in RPC")
+            if not isinstance(raw, dict) or not isinstance(raw.get("type"), str):
+                self.protocol_ok = False
+                raise RuntimeError("RPC invalid record")
+            if raw["type"] == "response" and (not isinstance(raw.get("id"), str)
+                    or raw["id"] not in ("state", "permissions") or raw["id"] in self.responses):
+                self.protocol_ok = False
+                raise RuntimeError("RPC invalid response")
+            self.failure_categories.update(failure_categories(raw))
+            message = sanitize(raw)
+            if message["type"] == "response":
+                self.responses[message["id"]] = message
+            else:
+                self.events.append(message)
+            if len(self.responses) > 32 or len(self.events) > 4096:
+                self.protocol_ok = False
+                raise RuntimeError("RPC protocol buffer limit exceeded")
 
     def pump(self, deadline):
         self.owned.remaining()
+        # A rejected record is discarded; later complete records remain inspectable.
+        if b"\n" in self.buffer:
+            self.records()
+            return
         if self.eof:
             raise RuntimeError("RPC EOF")
         remaining = deadline - time.monotonic()
@@ -236,72 +274,186 @@ class LiveRpc(integration.Rpc):
             chunk = os.read(key.fd, 65536)
             if not chunk:
                 self.eof = True
+                if self.buffer:
+                    self.protocol_ok = False
+                    self.buffer = b""
                 raise RuntimeError("RPC EOF")
             self.total_bytes += len(chunk)
             if self.total_bytes > 4 * 1024 * 1024:
+                self.protocol_ok = False
+                self.buffer = b""
                 raise RuntimeError("RPC aggregate limit exceeded")
             self.buffer += chunk
-            while b"\n" in self.buffer:
-                line, self.buffer = self.buffer.split(b"\n", 1)
-                assert self.sentinel not in line, "denied sentinel exposed in RPC"
-                try:
-                    raw = json.loads(line)
-                except (ValueError, UnicodeError):
-                    raise RuntimeError("RPC invalid JSON") from None
-                assert not contains_sentinel(raw, self.sentinel.decode()), "denied sentinel exposed in RPC"
-                self.failure_categories.update(failure_categories(raw))
-                message = sanitize(raw)
-                if message.get("type") == "response":
-                    self.responses[message.get("id")] = message
-                else:
-                    self.events.append(message)
-            if len(self.buffer) > 1024 * 1024 or len(self.responses) > 32 or len(self.events) > 4096:
+            self.records()
+            if len(self.buffer) > 1024 * 1024:
+                self.protocol_ok = False
+                self.buffer = b""
                 raise RuntimeError("RPC protocol buffer limit exceeded")
 
+    def request(self, request_id, request_type, timeout=10, **values):
+        # Do not use the base request's data-bearing assertion message.
+        self.proc.stdin.write(json.dumps({"id": request_id, "type": request_type, **values}).encode() + b"\n")
+        self.proc.stdin.flush()
+        deadline = time.monotonic() + timeout
+        while request_id not in self.responses:
+            self.pump(deadline)
+        response = self.responses.pop(request_id)
+        if response.get("command") != request_type:
+            self.protocol_ok = False
+            raise RuntimeError("RPC response command mismatch")
+        return response
 
-def verify(rpc, policy, counts, selector):
-    """Conjunctive oracle: actual args/details, real hooks/IDs and inode access."""
-    assert_sensor(counts)
-    settled = [e for e in rpc.events if e["type"] == "agent_settled"]
-    assert len(settled) == 1 and settled[0]["aborted"] is False, "run did not settle successfully"
-    starts = [e for e in rpc.events if e["type"] == "tool_execution_start"]
-    python = [e for e in starts if e["toolName"] == "python"]
-    assert len(python) == 1, "expected exactly one actual Python call"
-    parent = python[0]["toolCallId"]
-    args = python[0]["args"]
-    assert args.get("code") == CELL and args.get("operation", "execute") == "execute", "actual cell mismatch"
-    assert set(args) <= {"code", "operation"}, "unexpected Python arguments"
-    nested = [e for e in starts if e["toolName"] == "read"]
-    assert len(starts) == 3 and len(nested) == 2, "unexpected executed tools"
-    ids = [parent + "/1", parent + "/2"]
+
+PHASES = ("startup", "beforePrompt", "afterSettled", "finalShutdown")
+EVENT_TYPES = frozenset(("agent_start", "agent_end", "agent_settled", "turn_start", "turn_end",
+    "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_update",
+    "tool_execution_end", "queue_update", "entry_appended", "session_info_changed", "thinking_level_changed",
+    "compaction_start", "compaction_end", "auto_retry_start", "auto_retry_end", "summarization_retry_scheduled",
+    "summarization_retry_attempt_start", "summarization_retry_finished", "extension_error", "extension_ui_request"))
+ID_PATTERN = r"call_[A-Za-z0-9]{16,64}(?:\|fc_(?:call_)?[A-Za-z0-9]{16,64})?(?:/[1-9][0-9]{0,5})?"
+
+
+def safe_id(value):
+    return value if isinstance(value, str) and re.fullmatch(ID_PATTERN, value) else None
+
+
+def safe_error_type(error):
+    name = type(error).__name__
+    return name if name in ("AssertionError", "RuntimeError", "TimeoutError", "OSError",
+        "FileNotFoundError", "PermissionError", "ValueError", "TypeError", "KeyError", "BrokenPipeError",
+        "TimeoutExpired", "KeyboardInterrupt", "SystemExit") else "Error"
+
+
+def assert_report(report):
+    assert report["passed"], "permissions invariant failure"
+
+
+def verify(rpc, policy, phases, selector):
+    """Collect independent, bounded outcomes; never return uncontrolled observations."""
+    events = [e for e in rpc.events if isinstance(e, dict)]
+    settled = [e for e in events if e.get("type") == "agent_settled"]
+    starts = [e for e in events if e.get("type") == "tool_execution_start"]
+    python = [e for e in starts if e.get("toolName") == "python"]
+    actual_start = python[0] if len(python) == 1 else {}
+    parent = actual_start.get("toolCallId") if isinstance(actual_start.get("toolCallId"), str) else None
+    args = actual_start.get("args")
+    python_args_match = (isinstance(args, dict) and args.get("code") == CELL
+        and args.get("operation", "execute") == "execute" and set(args) <= {"code", "operation"})
+    nested = [e for e in starts if e.get("toolName") == "read"]
+    ids = [parent + "/1", parent + "/2"] if isinstance(parent, str) else [None, None]
     paths = [{"path": "allowed.txt"}, {"path": "denied.txt"}]
-    assert [e["toolCallId"] for e in nested] == ids, "pi-owned nested ID correlation failed"
-    assert [e["args"] for e in nested] == paths, "actual nested arguments mismatch"
-    assert all(e.get("parentToolCallId") == parent for e in nested), "execution parent correlation failed"
-    ends = [e for e in rpc.events if e["type"] == "tool_execution_end"]
-    by_id = {e["toolCallId"]: e for e in ends}
-    assert len(ends) == 3 and set(by_id) == {parent, *ids}, "execution end correlation failed"
-    assert by_id[ids[0]]["isError"] is False and by_id[ids[1]]["isError"] is True, "nested status mismatch"
-    assert "IUA_ALLOWED" in json.dumps(by_id[ids[0]]["result"]), "allowed content missing"
-    assert "IUA_DENIED" in json.dumps(by_id[ids[1]]["result"]), "meaningful denied result missing"
-    actual = by_id[parent]
-    assert actual["isError"] is False, "Python failed"
-    assert actual["result"]["details"] == {"result": EXPECTED, "output": "", "truncated": False}, "actual Python details mismatch"
-    calls = [e for e in policy if e["type"] == "tool_call"]
-    assert len(calls) == 3, "hook call counters mismatch"
-    assert [(e["toolName"], e["toolCallId"]) for e in calls] == [("python", parent), ("read", ids[0]), ("read", ids[1])], "hook IDs/names mismatch"
-    assert calls[0]["input"] == args and [e["input"] for e in calls[1:]] == paths, "hook arguments mismatch"
-    results = [e for e in policy if e["type"] == "tool_result"]
-    # Pi emits tool_result only for executed tools, not policy-blocked calls.
-    assert [(e["toolName"], e["toolCallId"], e["isError"]) for e in results] == [("read", ids[0], False), ("python", parent, False)], "hook result counters mismatch"
-    assistants = [e["message"] for e in rpc.events if e["type"] == "message_end" and e["message"]["role"] == "assistant"]
-    assert assistants and all(m["provider"] + "/" + m["model"] == selector for m in assistants), "model substitution"
-    assert all(m["stopReason"] not in ("error", "aborted", "length") for m in assistants), "model failed"
-    usage = {k: sum(m["usage"].get(k, 0) for m in assistants) for k in ("input", "output", "cacheRead", "cacheWrite", "totalTokens")}
-    assert usage["totalTokens"] > 0, "missing model usage"
-    return {"model": selector, "assistantMessages": len(assistants), "usage": usage,
-            "policyCalls": len(calls), "policyResults": len(results), "executionStarts": len(starts),
-            "executionEnds": len(ends), "sensor": counts, "pythonDetails": actual["result"]["details"]}
+    ends = [e for e in events if e.get("type") == "tool_execution_end"]
+    by_id = {e["toolCallId"]: e for e in ends if isinstance(e.get("toolCallId"), str)}
+    allowed, denied, actual = (by_id.get(i, {}) for i in (*ids, parent))
+    calls = [e for e in policy if isinstance(e, dict) and e.get("type") == "tool_call"]
+    results = [e for e in policy if isinstance(e, dict) and e.get("type") == "tool_result"]
+    assistants = [e["message"] for e in events if e.get("type") == "message_end"
+        and isinstance(e.get("message"), dict) and e["message"].get("role") == "assistant"]
+    usage = {k: sum(m.get("usage", {}).get(k, 0) for m in assistants
+        if isinstance(m.get("usage"), dict) and type(m["usage"].get(k, 0)) in (int, float)
+        and 0 <= m["usage"].get(k, 0) <= 1000000000)
+        for k in ("input", "output", "cacheRead", "cacheWrite", "totalTokens")}
+    phase_counts = {name: {path: phases[name].get(path) for path in ("allowed.txt", "denied.txt")}
+        for name in PHASES if isinstance(phases.get(name), dict)}
+    counts_valid = (len(phase_counts) == len(PHASES) and all(type(n) is int and 0 <= n <= 1000000000
+        for counts in phase_counts.values() for n in counts.values()))
+    checks = {
+        "sensor": counts_valid and all(c["denied.txt"] == 0 for c in phase_counts.values())
+            and phase_counts["afterSettled"]["allowed.txt"] > 0 and phase_counts["finalShutdown"]["allowed.txt"] > 0,
+        "sensor_monotonic": counts_valid and all(phase_counts[a][p] <= phase_counts[b][p]
+            for a, b in zip(PHASES, PHASES[1:]) for p in ("allowed.txt", "denied.txt")),
+        "settled": len(settled) == 1 and settled[0].get("aborted") is False,
+        "python_call_count": len(python) == 1,
+        "actual_python_arguments": python_args_match,
+        "execution_counts": len(starts) == 3 and len(nested) == 2,
+        "nested_ids": isinstance(parent, str) and [e.get("toolCallId") for e in nested] == ids,
+        "nested_arguments": [e.get("args") for e in nested] == paths,
+        "nested_parent": len(nested) == 2 and parent is not None and all(e.get("parentToolCallId") == parent for e in nested),
+        "execution_ends": len(ends) == 3 and parent is not None and set(by_id) == {parent, *ids},
+        "nested_status": allowed.get("isError") is False and denied.get("isError") is True,
+        "allowed_content": "IUA_ALLOWED" in json.dumps(allowed.get("result")),
+        "denial_reason": "IUA_DENIED" in json.dumps(denied.get("result")),
+        "python_status": actual.get("isError") is False,
+        "python_result_envelope": isinstance(actual.get("result"), dict) and actual["result"].get("details")
+            == {"result": EXPECTED, "output": "", "truncated": False},
+        "hook_calls": len(calls) == 3,
+        "hook_ids": len(calls) == 3 and all(e.get("idMatches") is True for e in calls)
+            and [(e.get("toolName"), e.get("toolCallId")) for e in calls] == [("python", parent), ("read", ids[0]), ("read", ids[1])],
+        "hook_arguments": len(calls) == 3 and all(e.get("argumentMatches") is True for e in calls)
+            and [e.get("path") for e in calls[1:]] == ["allowed.txt", "denied.txt"],
+        "hook_denial_reason": [e.get("denialReason") for e in calls] == ["none", "none", "IUA_DENIED"],
+        # Blocked tools do not emit tool_result; only actual executions do.
+        "hook_results": all(e.get("idMatches") is True and e.get("argumentMatches") is True for e in results)
+            and [(e.get("toolName"), e.get("toolCallId"), e.get("isError")) for e in results]
+                == [("read", ids[0], False), ("python", parent, False)],
+        "selected_model": bool(assistants) and all(m.get("provider", "") + "/" + m.get("model", "") == selector for m in assistants
+            if isinstance(m.get("provider"), str) and isinstance(m.get("model"), str))
+            and all(isinstance(m.get("provider"), str) and isinstance(m.get("model"), str) for m in assistants),
+        "model_status": bool(assistants) and all(m.get("stopReason") in ("stop", "toolUse") for m in assistants),
+        "model_usage": usage["totalTokens"] > 0,
+        "rpc_privacy": rpc.privacy_ok,
+        "rpc_protocol": rpc.protocol_ok,
+        "rpc_event_types": all(isinstance(e.get("type"), str) and e["type"] in EVENT_TYPES for e in events),
+    }
+    # Only valid fixture IDs, booleans and exact path whitelist leave this function.
+    observations = [{"type": e["type"], "toolName": e.get("toolName") if e.get("toolName") in ("python", "read") else "other",
+        "idMatches": e.get("idMatches") is True, "argumentMatches": e.get("argumentMatches") is True,
+        **({"toolCallId": safe_id(e.get("toolCallId"))} if safe_id(e.get("toolCallId")) else {}),
+        **({"path": e["path"]} if e.get("path") in ("allowed.txt", "denied.txt") else {}),
+        **({"denialReason": e["denialReason"] if e.get("denialReason") in ("none", "IUA_DENIED", "IUA_UNEXPECTED_TOOL") else "unknown"}
+            if e["type"] == "tool_call" else {"isError": e.get("isError") if type(e.get("isError")) is bool else None})}
+        for e in (calls + results)[:16]]
+    safe_phases = {phase: {p: n if type(n) is int and 0 <= n <= 1000000000 else None for p, n in counts.items()}
+        for phase, counts in phase_counts.items()}
+    return {"passed": all(checks.values()), "checks": {name: "PASS" if ok else "FAIL" for name, ok in checks.items()},
+        "model": selector, "assistantMessages": len(assistants), "usage": usage, "policyCalls": len(calls),
+        "policyResults": len(results), "executionStarts": len(starts), "executionEnds": len(ends), "sensorPhases": safe_phases,
+        "actualPythonArgumentsMatch": python_args_match, "nestedArgumentsMatch": checks["nested_arguments"],
+        "hooks": observations, "unknownEventTypes": sum(not isinstance(e.get("type"), str) or e["type"] not in EVENT_TYPES for e in events)}
+
+
+def read_policy(path, sentinel):
+    """Discard leaked/malformed records, but inspect every available hook record."""
+    events, privacy_ok, protocol_ok = [], True, True
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return events, privacy_ok, False
+    if len(data) > 1024 * 1024:
+        return events, privacy_ok, False
+    for line in data.split(b"\n"):
+        if not line:
+            continue
+        if sentinel.encode() in line:
+            privacy_ok = False
+            continue
+        try:
+            raw = json.loads(line)
+        except (ValueError, UnicodeError):
+            protocol_ok = False
+            continue
+        if contains_sentinel(raw, sentinel):
+            privacy_ok = False
+            continue
+        if not isinstance(raw, dict) or raw.get("type") not in ("tool_call", "tool_result"):
+            protocol_ok = False
+            continue
+        events.append(raw)
+    return events, privacy_ok, protocol_ok
+
+
+def collect_settled(rpc, timeout=55):
+    """Continue only observation after a rejected record, never resend a prompt."""
+    errors = set()
+    deadline = time.monotonic() + timeout
+    while not any(e.get("type") == "agent_settled" for e in rpc.events):
+        try:
+            rpc.pump(deadline)
+        except (AssertionError, RuntimeError, TimeoutError) as error:
+            errors.add(safe_error_type(error))
+            if rpc.eof or time.monotonic() >= deadline or rpc.total_bytes > 4 * 1024 * 1024:
+                break
+    return errors
 
 
 def live_check(env, cwd, installed, selector):
@@ -317,27 +469,46 @@ def live_check(env, cwd, installed, selector):
     argv = [env["PI_BIN"], "--mode", "rpc", "--no-session", "--tools", "python,read",
             "--provider", provider, "--model", model_id, "--thinking", "off",
             "--extension", str(ROOT / "permissions-probe.mjs")]
-    # Explicit opt-in exact existing provider reference; no provider source copy.
     if env.get("PI_RLM_COMPAT_EXTENSION"):
         argv.extend(["--extension", env["PI_RLM_COMPAT_EXTENSION"]])
     with tempfile.TemporaryFile() as stderr, ReadSensor([allowed, denied]) as sensor:
-        proc = subprocess.Popen(argv, cwd=cwd, env={**env, "PI_RLM_POLICY_LOG": str(policy)},
+        proc = subprocess.Popen(argv, cwd=cwd, env={**env, "PI_RLM_POLICY_LOG": str(policy), "PI_RLM_EXPECTED_CELL": CELL},
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, start_new_session=True)
         owned = isolation.OwnedProcesses(proc)
         rpc = LiveRpc(proc, owned, sentinel)
+        phases, errors, guards = {}, set(), {}
+        sidecars = []
         try:
-            state = rpc.request("state", "get_state")
-            assert state["success"] is True, "state request failed"
-            assert state["data"]["model"]["provider"] + "/" + state["data"]["model"]["id"] == selector, "selected model mismatch"
-            prompt = "Use the python tool exactly once with this EXACT code (preserve all characters and line breaks), then reply DONE. Do not call any other tool directly or retry the denied read.\n\n" + CELL
-            response = rpc.request("permissions", "prompt", message=prompt)
-            assert response["success"] is True and response["data"]["disposition"] == "started", "prompt not started"
-            integration.wait_until(lambda: any(e["type"] == "agent_settled" for e in rpc.events), rpc, owned, timeout=55)
-            policy_events = [json.loads(line) for line in policy.read_text().splitlines()]
-            assert not contains_sentinel(policy_events, sentinel), "denied sentinel exposed in hook log"
-            summary = verify(rpc, policy_events, sensor.counts(), selector)
+            try:
+                phases["startup"] = sensor.counts()
+            except Exception as error:
+                errors.add(safe_error_type(error))
+            state = {}
+            try:
+                state = rpc.request("state", "get_state")
+            except Exception as error:
+                errors.add(safe_error_type(error))
+            model = state.get("data", {}).get("model", {}) if isinstance(state.get("data"), dict) else {}
+            guards["state_response"] = state.get("success") is True
+            guards["state_model"] = isinstance(model, dict) and model.get("provider") == provider and model.get("id") == model_id
+            try:
+                phases["beforePrompt"] = sensor.counts()
+            except Exception as error:
+                errors.add(safe_error_type(error))
+            guards["prompt_response"] = False
+            if guards["state_response"] and guards["state_model"]:
+                prompt = "Use the python tool exactly once with this EXACT code (preserve all characters and line breaks), then reply DONE. Do not call any other tool directly or retry the denied read.\n\n" + CELL
+                try:
+                    response = rpc.request("permissions", "prompt", message=prompt)
+                    guards["prompt_response"] = response.get("success") is True and isinstance(response.get("data"), dict) and response["data"].get("disposition") == "started"
+                except Exception as error:
+                    errors.add(safe_error_type(error))
+                errors.update(collect_settled(rpc))
+            try:
+                phases["afterSettled"] = sensor.counts()
+            except Exception as error:
+                errors.add(safe_error_type(error))
             # Installed sidecar argv, not a copied factory or original index loader.
-            sidecars = []
             for pid in owned.remaining():
                 try:
                     argv_bytes = Path(f"/proc/{pid}/cmdline").read_bytes()
@@ -345,37 +516,56 @@ def live_check(env, cwd, installed, selector):
                     continue
                 if str(installed / "packages/rlm-kernel/python/sidecar.py").encode() in argv_bytes:
                     sidecars.append(pid)
-            assert len(sidecars) >= 1, "installed sidecar provenance missing"
+            guards["installed_sidecar"] = bool(sidecars)
             proc.stdin.close()
-            proc.wait(timeout=5)
-            assert proc.returncode == 0, "pi orderly shutdown failed"
+            deadline = time.monotonic() + 5
+            # Drain final stdout while observing orderly shutdown, including rejected records.
+            while not rpc.eof and time.monotonic() < deadline:
+                try:
+                    rpc.pump(deadline)
+                except (AssertionError, RuntimeError, TimeoutError) as error:
+                    if not rpc.eof:
+                        errors.add(safe_error_type(error))
+                    if rpc.total_bytes > 4 * 1024 * 1024:
+                        break
+            try:
+                proc.wait(timeout=max(.01, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired as error:
+                errors.add(safe_error_type(error))
+            guards["orderly_shutdown"] = proc.poll() == 0
             deadline = time.monotonic() + 3
             while owned.remaining() and time.monotonic() < deadline:
                 time.sleep(.01)
-            assert not owned.remaining(), "owned children survived before backup"
+            survivors = len(owned.remaining())
+            guards["owned_before_backup"] = survivors == 0
+            try:
+                phases["finalShutdown"] = sensor.counts()
+            except Exception as error:
+                errors.add(safe_error_type(error))
             stderr.seek(0)
-            assert sentinel.encode() not in stderr.read(), "denied sentinel exposed in stderr"
-            final_policy = policy.read_text()
-            assert sentinel not in final_policy and not contains_sentinel(
-                [json.loads(line) for line in final_policy.splitlines()], sentinel), "denied sentinel exposed in hook log"
-            assert_sensor(sensor.counts())
-            print("permissions live PASS: " + json.dumps({**summary, "installedSidecars": len(sidecars),
-                "observedOwnedPIDs": len(owned.observed), "survivorsBeforeBackup": 0}, sort_keys=True), flush=True)
-        except BaseException:
-            stderr.seek(0)
-            diagnostic = stderr.read().decode(errors="replace")
-            # Only allowlisted diagnostic classifications, never raw provider stderr.
-            categories = sorted(failure_categories(diagnostic) | rpc.failure_categories)
-            print("permissions safe failure context: " + json.dumps({"exit": proc.poll(),
-                "categories": categories, "rpcEventTypes": sorted({e["type"] for e in rpc.events}),
-                "sensor": sensor.counts()}), file=sys.stderr, flush=True)
-            raise
+            diagnostic = stderr.read()
+            guards["stderr_privacy"] = sentinel.encode() not in diagnostic
+            categories = sorted(failure_categories(diagnostic.decode(errors="replace")) | rpc.failure_categories)
+            policy_events, privacy_ok, protocol_ok = read_policy(policy, sentinel)
+            guards["hook_privacy"] = privacy_ok
+            guards["hook_protocol"] = protocol_ok
+            guards["observation_errors"] = not errors
+            report = verify(rpc, policy_events, phases, selector)
+            report["checks"].update({name: "PASS" if ok else "FAIL" for name, ok in guards.items()})
+            report.update({"passed": all(value == "PASS" for value in report["checks"].values()),
+                "installedSidecars": len(sidecars), "observedOwnedPIDs": len(owned.observed),
+                "survivorsBeforeBackup": survivors, "exit": proc.poll(), "categories": categories,
+                "errorTypes": sorted(errors)})
+            print("permissions live " + ("PASS: " if report["passed"] else "FAIL: ") + json.dumps(report, sort_keys=True), flush=True)
+            assert_report(report)
         finally:
-            owned.cleanup()
-            rpc.close()
-            if not proc.stdin.closed:
-                proc.stdin.close()
-            proc.stdout.close()
+            try:
+                owned.cleanup()
+            finally:
+                rpc.close()
+                if not proc.stdin.closed:
+                    proc.stdin.close()
+                proc.stdout.close()
 
 
 def worker(selector):

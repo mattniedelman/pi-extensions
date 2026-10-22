@@ -15,6 +15,233 @@ permissions = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(permissions)
 
 
+class DiagnosticControls(unittest.TestCase):
+    def fixture(self):
+        from types import SimpleNamespace
+        parent = "call_" + "a" * 32 + "|fc_call_" + "a" * 32
+        ids = [parent + "/1", parent + "/2"]
+        args = {"code": permissions.CELL}
+        paths = [{"path": "allowed.txt"}, {"path": "denied.txt"}]
+        events = [{"type": "agent_settled", "aborted": False},
+                  {"type": "tool_execution_start", "toolName": "python", "toolCallId": parent, "args": args}]
+        for index, path in enumerate(paths):
+            events.append({"type": "tool_execution_start", "toolName": "read", "toolCallId": ids[index],
+                           "parentToolCallId": parent, "args": path})
+            events.append({"type": "tool_execution_end", "toolName": "read", "toolCallId": ids[index],
+                           "isError": bool(index), "result": {"content": "IUA_DENIED" if index else "IUA_ALLOWED"}})
+        events.extend([{"type": "tool_execution_end", "toolName": "python", "toolCallId": parent,
+                        "isError": False, "result": {"details": {"result": permissions.EXPECTED, "output": "", "truncated": False}}},
+                       {"type": "message_end", "message": {"role": "assistant", "provider": "litellm",
+                        "model": "fixture", "stopReason": "stop", "usage": {"totalTokens": 1}}}])
+        policy = [{"type": "tool_call", "toolName": "python", "toolCallId": parent, "idMatches": True,
+                   "argumentMatches": True, "denialReason": "none"}]
+        for index, path in enumerate(paths):
+            policy.append({"type": "tool_call", "toolName": "read", "toolCallId": ids[index], "idMatches": True,
+                           "argumentMatches": True, "path": path["path"], "denialReason": "IUA_DENIED" if index else "none"})
+        policy.extend([{"type": "tool_result", "toolName": "read", "toolCallId": ids[0], "isError": False,
+                        "idMatches": True, "argumentMatches": True, "path": "allowed.txt"},
+                       {"type": "tool_result", "toolName": "python", "toolCallId": parent, "isError": False,
+                        "idMatches": True, "argumentMatches": True}])
+        rpc = SimpleNamespace(events=events, privacy_ok=True, protocol_ok=True)
+        phases = {"startup": {"allowed.txt": 0, "denied.txt": 0},
+                  "beforePrompt": {"allowed.txt": 0, "denied.txt": 0},
+                  "afterSettled": {"allowed.txt": 1, "denied.txt": 0},
+                  "finalShutdown": {"allowed.txt": 1, "denied.txt": 0}}
+        return rpc, policy, phases
+
+    def test_sensor_failure_does_not_abort_independent_checks(self):
+        rpc, policy, phases = self.fixture()
+        phases["afterSettled"]["denied.txt"] = phases["finalShutdown"]["denied.txt"] = 1
+        report = permissions.verify(rpc, policy, phases, "litellm/fixture")
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["checks"]["sensor"], "FAIL")
+        self.assertTrue(all(v == "PASS" for k, v in report["checks"].items() if k != "sensor"))
+        self.assertEqual(report["checks"]["actual_python_arguments"], "PASS")
+        self.assertEqual(report["checks"]["hook_results"], "PASS")
+        self.assertEqual(report["checks"]["python_result_envelope"], "PASS")
+        with self.assertRaisesRegex(AssertionError, "^permissions invariant failure$"):
+            permissions.assert_report(report)
+
+    def test_valid_record_and_each_original_invariant_is_strict(self):
+        rpc, policy, phases = self.fixture()
+        report = permissions.verify(rpc, policy, phases, "litellm/fixture")
+        self.assertTrue(report["passed"])
+        permissions.assert_report(report)
+        mutations = {
+            "settled": lambda r, p: r.events[0].update(aborted=True),
+            "actual_python_arguments": lambda r, p: r.events[1]["args"].update(code="synthetic-secret"),
+            "python_call_count": lambda r, p: r.events.append(r.events[1]),
+            "execution_counts": lambda r, p: r.events.append({"type": "tool_execution_start", "toolName": "other"}),
+            "nested_ids": lambda r, p: r.events[2].update(toolCallId="wrong"),
+            "nested_arguments": lambda r, p: r.events[2].update(args={"path": "synthetic-secret"}),
+            "nested_parent": lambda r, p: r.events[2].update(parentToolCallId="wrong"),
+            "execution_ends": lambda r, p: r.events.pop(3),
+            "nested_status": lambda r, p: r.events[5].update(isError=False),
+            "allowed_content": lambda r, p: r.events[3].update(result={}),
+            "denial_reason": lambda r, p: r.events[5].update(result={}),
+            "python_status": lambda r, p: r.events[6].update(isError=True),
+            "python_result_envelope": lambda r, p: r.events[6].update(result={"details": {}}),
+            "hook_calls": lambda r, p: p.pop(0),
+            "hook_ids": lambda r, p: p[0].update(idMatches=False),
+            "hook_arguments": lambda r, p: p[0].update(argumentMatches=False),
+            "hook_denial_reason": lambda r, p: p[2].update(denialReason="none"),
+            "hook_results": lambda r, p: p.pop(),
+            "selected_model": lambda r, p: r.events[7]["message"].update(model="synthetic-secret"),
+            "model_status": lambda r, p: r.events[7]["message"].update(stopReason="error"),
+            "model_usage": lambda r, p: r.events[7]["message"].update(usage={}),
+            "rpc_privacy": lambda r, p: setattr(r, "privacy_ok", False),
+            "rpc_protocol": lambda r, p: setattr(r, "protocol_ok", False),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(check=name):
+                rpc, policy, phases = self.fixture()
+                mutate(rpc, policy)
+                report = permissions.verify(rpc, policy, phases, "litellm/fixture")
+                self.assertFalse(report["passed"], "broken invariant accepted")
+                self.assertEqual(report["checks"][name], "FAIL")
+                self.assertNotIn("synthetic-secret", json.dumps(report))
+
+    def test_denied_access_at_any_phase_and_counter_reset_fail(self):
+        for phase in ("startup", "beforePrompt", "afterSettled", "finalShutdown"):
+            rpc, policy, phases = self.fixture()
+            phases[phase]["denied.txt"] = 1
+            report = permissions.verify(rpc, policy, phases, "litellm/fixture")
+            self.assertEqual(report["checks"]["sensor"], "FAIL")
+            self.assertFalse(report["passed"])
+        rpc, policy, phases = self.fixture()
+        phases["beforePrompt"]["allowed.txt"] = 2
+        report = permissions.verify(rpc, policy, phases, "litellm/fixture")
+        self.assertEqual(report["checks"]["sensor_monotonic"], "FAIL")
+        self.assertFalse(report["passed"])
+
+    def test_unknown_startup_and_protocol_records_report_without_secrets(self):
+        from types import SimpleNamespace
+        rpc = SimpleNamespace(events=[{"type": "synthetic-secret", "args": "synthetic-secret"},
+                                     {"type": "tool_execution_start", "toolName": "synthetic-secret",
+                                      "toolCallId": "synthetic-secret", "args": {"code": "synthetic-secret"}}],
+                              privacy_ok=True, protocol_ok=False)
+        report = permissions.verify(rpc, [], {"startup": {"allowed.txt": 0, "denied.txt": 0}}, "litellm/fixture")
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["checks"]["rpc_protocol"], "FAIL")
+        self.assertEqual(report["unknownEventTypes"], 1)
+        self.assertNotIn("synthetic-secret", json.dumps(report))
+        self.assertEqual(permissions.safe_error_type(AssertionError("synthetic-secret")), "AssertionError")
+        self.assertEqual(permissions.safe_error_type(type("synthetic-secret", (Exception,), {})("secret")), "Error")
+
+    def test_leak_drops_raw_record_but_next_pump_collects_available_evidence(self):
+        import time
+        from types import SimpleNamespace
+        sentinel = "synthetic-secret"
+        read_fd, write_fd = os.pipe()
+        with os.fdopen(read_fd, "rb") as stdout:
+            rpc = permissions.LiveRpc(SimpleNamespace(stdout=stdout), SimpleNamespace(remaining=lambda: []), sentinel)
+            try:
+                records = [{"type": "extension_error", "error": sentinel}, {"type": "agent_settled", "aborted": False}]
+                os.write(write_fd, b"".join(json.dumps(record).encode() + b"\n" for record in records))
+                with self.assertRaises(AssertionError):
+                    rpc.pump(time.monotonic() + 1)
+                rpc.pump(time.monotonic() + 1)
+                self.assertFalse(rpc.privacy_ok)
+                self.assertEqual(rpc.events, [records[1]])
+                self.assertNotIn(sentinel.encode(), rpc.buffer)
+            finally:
+                rpc.close(); os.close(write_fd)
+
+
+    def test_malformed_record_is_sticky_protocol_failure(self):
+        import time
+        from types import SimpleNamespace
+        for line in (b'[]', b'{"type":"response","id":[]}', b'{"type":7}', b'{invalid'):
+            with self.subTest(line=line):
+                read_fd, write_fd = os.pipe()
+                with os.fdopen(read_fd, "rb") as stdout:
+                    rpc = permissions.LiveRpc(SimpleNamespace(stdout=stdout), SimpleNamespace(remaining=lambda: []), "unused")
+                    try:
+                        os.write(write_fd, line + b"\n" + b'{"type":"agent_settled","aborted":false}\n')
+                        with self.assertRaises(RuntimeError):
+                            rpc.pump(time.monotonic() + 1)
+                        rpc.pump(time.monotonic() + 1)
+                        self.assertFalse(rpc.protocol_ok)
+                        self.assertEqual(rpc.events, [{"type": "agent_settled", "aborted": False}])
+                    finally:
+                        rpc.close(); os.close(write_fd)
+
+    def test_hook_logs_only_allowlisted_paths_matches_ids_and_decisions(self):
+        source = """
+import factory from %s;
+const handlers = {};
+factory({on: (name, handler) => {handlers[name] = handler;}});
+const parent = 'call_' + 'a'.repeat(32) + '|fc_call_' + 'a'.repeat(32);
+handlers.tool_call({toolName:'python', toolCallId:parent, input:{code:process.env.PI_RLM_EXPECTED_CELL}});
+handlers.tool_call({toolName:'read', toolCallId:parent+'/1', input:{path:'allowed.txt'}});
+handlers.tool_call({toolName:'read', toolCallId:parent+'/2', input:{path:'denied.txt'}});
+handlers.tool_result({toolName:'read', toolCallId:parent+'/1', input:{path:'allowed.txt'}, isError:false});
+handlers.tool_call({toolName:'synthetic-secret', toolCallId:'synthetic-secret', input:{path:'synthetic-secret'}});
+handlers.tool_result({toolName:'python', toolCallId:parent, input:{code:'synthetic-secret'}, isError:false});
+""" % json.dumps((ROOT / "permissions-probe.mjs").as_uri())
+        with tempfile.TemporaryDirectory(prefix="pi-iua-controls-") as directory:
+            path = Path(directory) / "policy.jsonl"
+            result = subprocess.run(["node", "--input-type=module", "-e", source],
+                env={**os.environ, "PI_RLM_POLICY_LOG": str(path), "PI_RLM_EXPECTED_CELL": permissions.CELL},
+                capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0)
+            raw = path.read_text()
+            self.assertTrue("synthetic-secret" not in raw, "unsafe hook observation retained")
+            events = [json.loads(line) for line in raw.splitlines()]
+            self.assertTrue(all(e["argumentMatches"] and e["idMatches"] for e in events[:4]))
+            self.assertEqual([e["denialReason"] for e in events[:3]], ["none", "none", "IUA_DENIED"])
+            self.assertFalse(events[4]["idMatches"])
+            self.assertNotIn("toolCallId", events[4])
+            self.assertFalse(events[5]["argumentMatches"])
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_hook_leaks_and_malformed_records_never_become_pass(self):
+        import secrets
+        sentinel = "IUA_PRIVATE_" + secrets.token_hex(24)
+        with tempfile.TemporaryDirectory(prefix="pi-iua-controls-") as directory:
+            path = Path(directory) / "policy.jsonl"
+            leaked = json.dumps({"type": "tool_call", "error": sentinel}).replace(sentinel,
+                "\\u%04x" % ord(sentinel[0]) + sentinel[1:])
+            safe = {"type": "tool_call", "toolName": "read", "argumentMatches": True}
+            path.write_text(leaked + "\n[]\n{invalid\n" + json.dumps(safe) + "\n")
+            events, privacy_ok, protocol_ok = permissions.read_policy(path, sentinel)
+            self.assertFalse(privacy_ok)
+            self.assertFalse(protocol_ok)
+            self.assertTrue(events == [safe], "unsafe hook record retained or safe record lost")
+
+    def test_settled_collector_keeps_observing_after_leak_without_retry(self):
+        from types import SimpleNamespace
+        read_fd, write_fd = os.pipe()
+        with os.fdopen(read_fd, "rb") as stdout:
+            rpc = permissions.LiveRpc(SimpleNamespace(stdout=stdout), SimpleNamespace(remaining=lambda: []), "synthetic-secret")
+            try:
+                os.write(write_fd, b'{"type":"extension_error","error":"synthetic-secret"}\n'
+                    b'{"type":"agent_settled","aborted":false}\n')
+                errors = permissions.collect_settled(rpc, timeout=1)
+                self.assertEqual(errors, {"AssertionError"})
+                self.assertFalse(rpc.privacy_ok)
+                self.assertEqual(rpc.events, [{"type": "agent_settled", "aborted": False}])
+            finally:
+                rpc.close(); os.close(write_fd)
+
+    def test_allowed_access_must_be_positive_before_and_after_shutdown(self):
+        rpc, policy, phases = self.fixture()
+        phases["afterSettled"]["allowed.txt"] = 0
+        report = permissions.verify(rpc, policy, phases, "litellm/fixture")
+        self.assertEqual(report["checks"]["sensor"], "FAIL")
+
+    def test_missing_allowed_baseline_and_unknown_events_fail(self):
+        rpc, policy, phases = self.fixture()
+        for counts in phases.values():
+            counts["allowed.txt"] = 0
+        report = permissions.verify(rpc, policy, phases, "litellm/fixture")
+        self.assertEqual(report["checks"]["sensor"], "FAIL")
+        rpc.events.append({"type": "synthetic-secret"})
+        report = permissions.verify(rpc, policy, phases, "litellm/fixture")
+        self.assertEqual(report["checks"]["rpc_event_types"], "FAIL")
+        self.assertNotIn("synthetic-secret", json.dumps(report))
+
+
 class Controls(unittest.TestCase):
     def test_no_model_is_explicit_skip(self):
         result = subprocess.run(["python3", str(ROOT / "e2e.py"), "--case", "permissions"],
@@ -330,7 +557,8 @@ if (call({toolName:'bash',toolCallId:'direct',input:{command:'true'}})?.block !=
             self.assertEqual(result.returncode, 0, result.stderr)
             events = [json.loads(line) for line in Path(env["PI_RLM_POLICY_LOG"]).read_text().splitlines()]
             self.assertEqual(len(events), 4)
-            self.assertEqual([event["input"] for event in events[:2]], [{"path": "allowed.txt"}, {"path": "denied.txt"}])
+            self.assertEqual([event["path"] for event in events[:2]], ["allowed.txt", "denied.txt"])
+            self.assertTrue(all("input" not in event for event in events))
 
 
 if __name__ == "__main__":

@@ -374,6 +374,18 @@ denied sentinel unknown to the model is checked against RPC, stderr and the hook
 log without exposing its value. RPC and hook JSON are checked recursively after
 decoding, including keys and fields that sanitization discards, so JSON escapes
 cannot hide a leak. RPC sensitive fields and provider diagnostics are suppressed.
+The bounded reporter collects named checks independently even when the sensor
+fails. It records cumulative startup, before-prompt, after-settled and final
+shutdown counts; any denied access or decreasing counter fails. No counter is
+reset and no phase is exempt. Actual Python/nested argument matches, real hook
+names/IDs/decisions/results, envelope/status, usage, privacy and protocol outcomes
+remain visible without raw code, uncontrolled paths, error strings or provider
+payloads. The hook log stores only fixture-path whitelist values, match flags,
+valid-format IDs and fixed denial reasons. Rejected leaked/malformed RPC records
+are discarded before storage; later available records can still be inspected,
+but the privacy/protocol failure is permanent. Every check must pass; a safe
+failure report is printed before a constant invariant assertion. Diagnostics do
+not repair runtime behavior or explain earlier intermittent sensor failures.
 Orderly EOF must leave zero owned survivors BEFORE supervisor
 backup; all private fixture roots must be absent afterward. This narrow check
 proves nested permission denial, not the separate full lifecycle/RSS gate.
