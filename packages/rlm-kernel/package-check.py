@@ -19,6 +19,7 @@ REQUIRED = {
         "python/sidecar.py", "python/pyproject.toml", "python/uv.lock",
         "python/check.py", "python/recovery_check.py", "python/recovery_timeout_check.py",
         "check.mjs", "bridge-check.mjs", "integration.py", "e2e.py",
+        "permissions.py", "permissions_tests.py", "permissions-probe.mjs",
         "install-check.py", "index-probe.ts", "installed-probe.ts",
         "isolated-check.py", "isolated_check_tests.py",
     )),

@@ -50,6 +50,14 @@ class RegistrationTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "test registration:"):
             metadata_for(script)
 
+    def test_permission_oracle_is_required_in_artifact(self):
+        spec = importlib.util.spec_from_file_location("package_artifact_contract", CHECKER)
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        paths = {"packages/rlm-kernel/" + name for name in
+                 ("permissions.py", "permissions_tests.py", "permissions-probe.mjs")}
+        self.assertTrue(paths <= checker.REQUIRED, "permission oracle missing from required artifact contract")
+
     def test_actual_seven_program_manifest(self):
         self.assertEqual(len(SCRIPT.split(" && ")), 7)
         self.assertEqual(metadata_for(SCRIPT), "4 extension entries; 3 host peers; 4 kernel test programs")

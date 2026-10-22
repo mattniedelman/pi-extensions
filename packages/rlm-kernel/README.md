@@ -334,6 +334,48 @@ readiness; the explicit distribution check also proves actual install/list/remov
 and private retention/cleanup. Opt-in paid lifecycle checks remain a separate
 completion gate.
 
+## Opt-in live permission check
+
+The maintained permission oracle is explicit and paid, not part of `npm test`:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 timeout 20s python3 packages/rlm-kernel/permissions_tests.py
+HINDSIGHT_DISABLED=true timeout 90s python3 packages/rlm-kernel/e2e.py --case permissions
+PI_RLM_TEST_MODEL=litellm/us.openai.gpt-6.1-sol HINDSIGHT_DISABLED=true timeout 90s python3 packages/rlm-kernel/e2e.py --case permissions
+```
+
+Without `PI_RLM_TEST_MODEL`, the command clearly reports SKIP. The live command
+requires explicit authorization to read the selected agent's `models.json`,
+`models-store.json`, and ONLY the `litellm` entry of `auth.json`. Do not run it
+with credential access denied or treat model selection as credential approval.
+The helper parses source auth in memory without inspecting other entry values,
+serializes only `litellm` into an exclusively created 0600 copy under a private
+0700 agent, and never prints/hashes credential values. Source auth is read-only;
+in-memory byte equality is checked after the run. Normal SDK refresh may change
+only the private copy. Auth and model copies are deleted in `finally`, including
+setup/body failures. Synthetic two-provider controls test selection, private
+modes, existing-path rejection, source equality and failure cleanup without real
+credentials. Existing source `pi-provider-litellm` 4.4.1 is loaded read-only
+through normal package discovery; no network installation, new provider or
+credential guessing is involved. Use only the authorized configured selector.
+
+The worker actually installs an independent committed checkout with copied Git
+objects and no alternates/origin, checks manifest/runtime provenance, and makes
+only its original fixture unavailable. Agent, cwd, sessions, state and venv stay
+private; user settings, checkpoints and worktrees are not moved. One exact Python
+cell calls the builtin allowed and denied reads through pi's owned nested
+execution. A temporary real `tool_call` hook blocks the denied read with
+`IUA_DENIED`; it never replaces read or fabricates events. The oracle asserts
+actual cell/result details, exact nested arguments, call IDs and parent
+correlation, hook/result counts, error status and positive selected-model usage.
+Linux inode `IN_ACCESS` independently requires actual allowed access and zero
+denied access, distinguishing denial from post-execution redaction. A random
+denied sentinel unknown to the model is checked against RPC, stderr and the hook
+log without exposing its value. RPC sensitive fields and provider diagnostics
+are suppressed. Orderly EOF must leave zero owned survivors BEFORE supervisor
+backup; all private fixture roots must be absent afterward. This narrow check
+proves nested permission denial, not the separate full lifecycle/RSS gate.
+
 V1 does not load Python-backed skills, expose arbitrary host objects, provide
 full CPython, support image results or parallel tool calls, implement delegation
 or subagents, migrate user configuration, or add branch-state cloning.
