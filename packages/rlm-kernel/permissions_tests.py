@@ -143,6 +143,56 @@ class Controls(unittest.TestCase):
             # The helper must detect, not overwrite, an external source change.
             self.assertEqual((source / "auth.json").read_text(), "synthetic external modification")
 
+    def test_actual_pump_rejects_literal_and_escaped_raw_json_before_sanitizing(self):
+        import secrets
+        import time
+        from types import SimpleNamespace
+        sentinel = "IUA_PRIVATE_" + secrets.token_hex(24)
+        payloads = {
+            "error": {"type": "extension_error", "error": sentinel},
+            "nested": {"type": "message_end", "message": {"content": [{"text": sentinel}]}},
+            "model": {"type": "response", "id": "state", "data": {"model": {"private": sentinel}}},
+            "header": {"type": "response", "id": "state", "headers": {"Authorization": sentinel}},
+            "key": {"type": "extension_error", sentinel: "discarded"},
+        }
+        for location, payload in payloads.items():
+            for escaped in (False, True):
+                with self.subTest(location=location, escaped=escaped):
+                    line = json.dumps(payload)
+                    if escaped:
+                        line = line.replace(sentinel, "\\u%04x" % ord(sentinel[0]) + sentinel[1:])
+                    read_fd, write_fd = os.pipe()
+                    with os.fdopen(read_fd, "rb") as stdout:
+                        rpc = permissions.LiveRpc(SimpleNamespace(stdout=stdout), SimpleNamespace(remaining=lambda: []), sentinel)
+                        try:
+                            os.write(write_fd, line.encode() + b"\n")
+                            with self.assertRaises(AssertionError) as caught:
+                                rpc.pump(time.monotonic() + 1)
+                            # Never use data-bearing equality assertions or subtest labels.
+                            self.assertTrue(str(caught.exception) == "denied sentinel exposed in RPC", "unsafe leak exception message")
+                            self.assertFalse(rpc.events or rpc.responses, "leaked record retained")
+                        finally:
+                            rpc.close()
+                            os.close(write_fd)
+
+    def test_actual_pump_invalid_json_has_constant_safe_error(self):
+        import secrets
+        import time
+        from types import SimpleNamespace
+        synthetic = secrets.token_hex(24)
+        read_fd, write_fd = os.pipe()
+        with os.fdopen(read_fd, "rb") as stdout:
+            rpc = permissions.LiveRpc(SimpleNamespace(stdout=stdout), SimpleNamespace(remaining=lambda: []), "unused")
+            try:
+                os.write(write_fd, ('{"type":"' + synthetic + '\n').encode())
+                with self.assertRaises(RuntimeError) as caught:
+                    rpc.pump(time.monotonic() + 1)
+                self.assertTrue(str(caught.exception) == "RPC invalid JSON", "unsafe parser exception message")
+                self.assertTrue(caught.exception.__suppress_context__, "parser context not suppressed")
+            finally:
+                rpc.close()
+                os.close(write_fd)
+
     def test_sanitizer_drops_model_secrets_and_provider_errors(self):
         raw = {"type": "response", "id": "state", "command": "get_state", "success": True,
                "data": {"model": {"provider": "litellm", "id": "test", "api": "openai-responses",
