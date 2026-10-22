@@ -456,9 +456,9 @@ def collect_settled(rpc, timeout=55):
     return errors
 
 
-def live_check(env, cwd, installed, selector):
+def live_check(env, cwd, installed, selector, *, replay=False):
     provider, model_id = selector.split("/", 1)
-    assert provider == "litellm" and model_id, "selected configured LiteLLM model required"
+    assert (selector == "q1s-local-replay/fixed-python" if replay else provider == "litellm" and model_id), "wrong permission transport selector"
     allowed, denied = cwd / "allowed.txt", cwd / "denied.txt"
     allowed.write_text("IUA_ALLOWED\n")
     sentinel = "IUA_PRIVATE_" + secrets.token_hex(24)
@@ -468,7 +468,7 @@ def live_check(env, cwd, installed, selector):
     policy = cwd / "policy.jsonl"
     argv = [env["PI_BIN"], "--mode", "rpc", "--no-session", "--tools", "python,read",
             "--provider", provider, "--model", model_id, "--thinking", "off",
-            "--extension", str(ROOT / "permissions-probe.mjs")]
+            "--extension", str(ROOT / ("permissions-replay-probe.ts" if replay else "permissions-probe.mjs"))]
     if env.get("PI_RLM_COMPAT_EXTENSION"):
         argv.extend(["--extension", env["PI_RLM_COMPAT_EXTENSION"]])
     with tempfile.TemporaryFile() as stderr, ReadSensor([allowed, denied]) as sensor:
@@ -503,7 +503,7 @@ def live_check(env, cwd, installed, selector):
                     guards["prompt_response"] = response.get("success") is True and isinstance(response.get("data"), dict) and response["data"].get("disposition") == "started"
                 except Exception as error:
                     errors.add(safe_error_type(error))
-                errors.update(collect_settled(rpc))
+                errors.update(collect_settled(rpc, timeout=12 if replay else 55))
             try:
                 phases["afterSettled"] = sensor.counts()
             except Exception as error:
