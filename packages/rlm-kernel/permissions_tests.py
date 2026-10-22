@@ -41,6 +41,25 @@ class Controls(unittest.TestCase):
             self.assertEqual(list(target.iterdir()), [])
             self.assertEqual({name: (source / name).read_bytes() for name in permissions.MODEL_FILES}, originals)
 
+    def test_model_success_and_exclusive_existing_path(self):
+        with tempfile.TemporaryDirectory(prefix="pi-iua-controls-") as directory:
+            root = Path(directory)
+            source, target = root / "source", root / "target"
+            source.mkdir(); target.mkdir(mode=0o700)
+            for name in permissions.MODEL_FILES:
+                (source / name).write_text('{}')
+            with permissions.private_models(source, target):
+                self.assertEqual(set(p.name for p in target.iterdir()), set(permissions.MODEL_FILES))
+            self.assertEqual(list(target.iterdir()), [])
+            # Collision on the second copy must clean the first but retain existing bytes.
+            existing = target / permissions.MODEL_FILES[1]
+            existing.write_text("existing private fixture")
+            with self.assertRaises(FileExistsError):
+                with permissions.private_models(source, target):
+                    self.fail("existing model overwritten")
+            self.assertEqual(list(target.iterdir()), [existing])
+            self.assertEqual(existing.read_text(), "existing private fixture")
+
     def test_partial_copy_cleanup(self):
         with tempfile.TemporaryDirectory(prefix="pi-iua-controls-") as directory:
             root = Path(directory)
@@ -51,6 +70,78 @@ class Controls(unittest.TestCase):
                 with permissions.private_models(source, target):
                     self.fail("missing source accepted")
             self.assertEqual(list(target.iterdir()), [])
+
+    def test_auth_selects_only_litellm_and_cleans_success_and_failure(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory(prefix="pi-iua-controls-") as directory:
+                root = Path(directory)
+                source, target = root / "source", root / "target"
+                source.mkdir(); target.mkdir(mode=0o700)
+                selected = {"type": "oauth", "access": "synthetic-selected", "refresh": "synthetic-refresh"}
+                original = json.dumps({"other-provider": {"key": "synthetic-unselected"}, "litellm": selected}).encode()
+                (source / "auth.json").write_bytes(original)
+                try:
+                    with permissions.private_litellm_auth(source, target):
+                        self.assertEqual(json.loads((target / "auth.json").read_bytes()), {"litellm": selected})
+                        self.assertNotIn(b"synthetic-unselected", (target / "auth.json").read_bytes())
+                        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o700)
+                        self.assertEqual(stat.S_IMODE((target / "auth.json").stat().st_mode), 0o600)
+                        # Normal SDK refresh is permitted only on the private copy.
+                        (target / "auth.json").write_text('{"litellm":{"access":"synthetic-refreshed"}}')
+                        if fail:
+                            raise RuntimeError("deliberate body failure")
+                except RuntimeError as error:
+                    self.assertTrue(fail)
+                    self.assertEqual(str(error), "deliberate body failure")
+                self.assertFalse((target / "auth.json").exists())
+                self.assertEqual((source / "auth.json").read_bytes(), original)
+
+    def test_auth_setup_failures_are_private_and_exclusive(self):
+        with tempfile.TemporaryDirectory(prefix="pi-iua-controls-") as directory:
+            root = Path(directory)
+            source, target = root / "source", root / "target"
+            source.mkdir(); target.mkdir(mode=0o700)
+            for original in (b'{"litellm": synthetic-secret-invalid}', b'{"other":{"key":"synthetic-unselected"}}',
+                             b'{"litellm":null}', b'[]'):
+                (source / "auth.json").write_bytes(original)
+                with self.subTest(original=original), self.assertRaises(RuntimeError) as caught:
+                    with permissions.private_litellm_auth(source, target):
+                        self.fail("invalid source accepted")
+                self.assertEqual(str(caught.exception), "private LiteLLM auth setup failed")
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertFalse((target / "auth.json").exists())
+                self.assertEqual((source / "auth.json").read_bytes(), original)
+            (source / "auth.json").write_text('{"litellm":{"key":"synthetic-selected"}}')
+            for mode in (0o755, 0o700):
+                target.chmod(mode)
+                existing = target / "auth.json"
+                existing.write_text("existing private fixture")
+                with self.assertRaises(RuntimeError):
+                    with permissions.private_litellm_auth(source, target):
+                        self.fail("unsafe mode/existing path accepted")
+                self.assertEqual(existing.read_text(), "existing private fixture")
+                existing.unlink()
+
+    def test_auth_partial_write_cleanup_and_source_change_detection(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory(prefix="pi-iua-controls-") as directory:
+            root = Path(directory)
+            source, target = root / "source", root / "target"
+            source.mkdir(); target.mkdir(mode=0o700)
+            original = b'{"litellm":{"key":"synthetic-selected"}}'
+            (source / "auth.json").write_bytes(original)
+            with patch.object(permissions.json, "dump", side_effect=OSError("synthetic-secret-error")):
+                with self.assertRaisesRegex(RuntimeError, "^private LiteLLM auth setup failed$"):
+                    with permissions.private_litellm_auth(source, target):
+                        self.fail("partial write accepted")
+            self.assertFalse((target / "auth.json").exists())
+            self.assertEqual((source / "auth.json").read_bytes(), original)
+            with self.assertRaisesRegex(RuntimeError, "^source auth changed during private check$"):
+                with permissions.private_litellm_auth(source, target):
+                    (source / "auth.json").write_text("synthetic external modification")
+            self.assertFalse((target / "auth.json").exists())
+            # The helper must detect, not overwrite, an external source change.
+            self.assertEqual((source / "auth.json").read_text(), "synthetic external modification")
 
     def test_sanitizer_drops_model_secrets_and_provider_errors(self):
         raw = {"type": "response", "id": "state", "command": "get_state", "success": True,

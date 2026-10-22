@@ -46,6 +46,49 @@ def private_models(source, target):
         assert not any(path.exists() for path in created), "private model copies survived"
 
 
+@contextmanager
+def private_litellm_auth(source, target):
+    """Read-only source; select only litellm into an exclusive private SDK copy."""
+    original = None
+    created = False
+    path = target / "auth.json"
+    try:
+        try:
+            mode = target.lstat()
+            if (not stat.S_ISDIR(mode.st_mode) or stat.S_IMODE(mode.st_mode) != 0o700
+                    or mode.st_uid != os.getuid() or source.resolve() == target.resolve()):
+                raise ValueError("private owner-only agent required")
+            original = (source / "auth.json").read_bytes()
+            # Parsing the whole JSON is unavoidable; never inspect/serialize other entries.
+            selected = json.loads(original)["litellm"]
+            if not isinstance(selected, dict):
+                raise ValueError("selected credential missing")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            created = True
+            with os.fdopen(fd, "w") as output:
+                json.dump({"litellm": selected}, output)
+            if stat.S_IMODE(path.stat().st_mode) != 0o600:
+                raise ValueError("private copy mode required")
+        except Exception:
+            raise RuntimeError("private LiteLLM auth setup failed") from None
+        yield
+    finally:
+        # SDK refresh can replace this copy, but never receives the source path.
+        try:
+            if created:
+                path.unlink(missing_ok=True)
+        except OSError:
+            raise RuntimeError("private LiteLLM auth cleanup failed") from None
+        finally:
+            if original is not None:
+                try:
+                    unchanged = (source / "auth.json").read_bytes() == original
+                except OSError:
+                    unchanged = False
+                if not unchanged:
+                    raise RuntimeError("source auth changed during private check") from None
+
+
 def configure_provider(agent, selector, package):
     """Load the existing normal provider package, using only the private cache root."""
     provider, _, model_id = selector.partition("/")
@@ -362,7 +405,7 @@ def run(selector):
                     "PI_RLM_PROVIDER_PACKAGE": str(source / "npm/node_modules/pi-provider-litellm")})
         if compatibility.is_file():
             env["PI_RLM_COMPAT_EXTENSION"] = str(compatibility)
-        with private_models(source, agent):
+        with private_models(source, agent), private_litellm_auth(source, agent):
             result = isolation.run_owned_capture([sys.executable, str(ROOT / "e2e.py"), "--case", "permissions", "--_worker", "--model", selector],
                 cwd=agent.parent / "cwd", env=env, timeout=75)
         # Worker never prints provider diagnostics, raw state/config or errors.
@@ -370,5 +413,6 @@ def run(selector):
         print(result.stderr, end="", file=sys.stderr)
         status = result.returncode
     assert not agent.exists(), "private fixture root survived"
+    print("permissions source auth unchanged (in-memory byte comparison); private selected-only auth/model copies absent", flush=True)
     print("permissions private config/agent/cwd/session/state/source cleanup: absent", flush=True)
     return status
