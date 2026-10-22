@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("installation", ROOT / "install-check.py")
@@ -43,6 +44,56 @@ def private_models(source, target):
         for path in created:
             path.unlink(missing_ok=True)
         assert not any(path.exists() for path in created), "private model copies survived"
+
+
+def configure_provider(agent, selector, package):
+    """Load the existing normal provider package, using only the private cache root."""
+    provider, _, model_id = selector.partition("/")
+    assert provider == "litellm" and model_id, "selected LiteLLM model required"
+    manifest = json.loads((package / "package.json").read_text())
+    assert manifest.get("name") == "pi-provider-litellm", "wrong normal provider package"
+    assert manifest.get("pi", {}).get("extensions") == ["./src/index.ts"], "wrong normal provider entry"
+    cache = json.loads((agent / "models-store.json").read_text())
+    selected = [m for m in cache.get(provider, {}).get("models", []) if m.get("id") == model_id]
+    assert len(selected) == 1, "selected cached model missing or ambiguous"
+    model = selected[0]
+    assert model.get("provider") == provider and model.get("api") == "openai-responses", "wrong cached model transport"
+    assert "headers" not in model and "apiKey" not in model, "unexpected cached credential fields"
+    try:
+        endpoint = urlsplit(model["baseUrl"])
+        safe = endpoint.scheme == "https" and endpoint.hostname and not (
+            endpoint.username or endpoint.password or endpoint.query or endpoint.fragment)
+        endpoint.port  # Validate without reporting URL values.
+    except (KeyError, TypeError, ValueError):
+        safe = False
+    assert safe and endpoint.path.rstrip("/").endswith("/v1"), "unsafe cached model endpoint"
+    root = urlunsplit((endpoint.scheme, endpoint.netloc, endpoint.path.rstrip("/")[:-3], "", ""))
+    settings = agent / "settings.json"
+    configured = json.loads(settings.read_text())
+    configured.setdefault("packages", []).append({"source": str(package), "skills": [], "prompts": [], "themes": []})
+    configured["litellm"] = {"providers": {provider: {"baseUrl": root}},
+        **{feature: {"enabled": False} for feature in ("skills", "mcp", "budget")}}
+    configured["enabledModels"] = [selector]
+    settings.chmod(0o600)
+    settings.write_text(json.dumps(configured))
+    return {"name": "pi-provider-litellm", "version": manifest["version"], "entry": "./src/index.ts"}
+
+
+def failure_categories(value):
+    """Allowlisted categories only; never retain provider error material."""
+    if isinstance(value, dict):
+        return set().union(*(failure_categories(v) for k, v in value.items()
+                             if k in ("error", "errorMessage", "finalError") or isinstance(v, (dict, list))))
+    if isinstance(value, list):
+        return set().union(*(failure_categories(v) for v in value))
+    if not isinstance(value, str):
+        return set()
+    return {name for name, terms in {
+        "model-not-found": ("model not found", "no models available", "unknown provider"),
+        "credential-unavailable": ("no api key", "api key not found", "missing api key", "authentication",
+                                   "no credentials", "missing credentials"),
+        "extension-load-failure": ("failed to load extension", "cannot find module"),
+    }.items() if any(term in value.lower() for term in terms)}
 
 
 def sanitize(value):
@@ -117,6 +168,7 @@ class LiveRpc(integration.Rpc):
         self.events = []
         self.sentinel = sentinel.encode()
         self.total_bytes = 0
+        self.failure_categories = set()
 
     def pump(self, deadline):
         self.owned.remaining()
@@ -137,7 +189,9 @@ class LiveRpc(integration.Rpc):
             while b"\n" in self.buffer:
                 line, self.buffer = self.buffer.split(b"\n", 1)
                 assert self.sentinel not in line, "denied sentinel exposed in RPC"
-                message = sanitize(json.loads(line))
+                raw = json.loads(line)
+                self.failure_categories.update(failure_categories(raw))
+                message = sanitize(raw)
                 if message.get("type") == "response":
                     self.responses[message.get("id")] = message
                 else:
@@ -248,11 +302,7 @@ def live_check(env, cwd, installed, selector):
             stderr.seek(0)
             diagnostic = stderr.read().decode(errors="replace")
             # Only allowlisted diagnostic classifications, never raw provider stderr.
-            categories = [name for name, terms in {
-                "model-not-found": ("model not found", "no models available", "unknown provider"),
-                "credential-unavailable": ("no api key", "api key not found", "missing api key", "authentication"),
-                "extension-load-failure": ("failed to load extension", "cannot find module"),
-            }.items() if any(term in diagnostic.lower() for term in terms)]
+            categories = sorted(failure_categories(diagnostic) | rpc.failure_categories)
             print("permissions safe failure context: " + json.dumps({"exit": proc.poll(),
                 "categories": categories, "rpcEventTypes": sorted({e["type"] for e in rpc.events}),
                 "sensor": sensor.counts()}), file=sys.stderr, flush=True)
@@ -293,6 +343,8 @@ def worker(selector):
         configured["packages"] = [{"source": packages[0], "extensions": ["+packages/rlm-kernel/index.ts"], "skills": [], "prompts": [], "themes": []}]
         settings.write_text(json.dumps(configured))
         settings.chmod(0o600)
+        identity = configure_provider(settings.parent, selector, Path(env["PI_RLM_PROVIDER_PACKAGE"]))
+        print("permissions normal provider package: " + json.dumps(identity, sort_keys=True), flush=True)
         print(f"permissions source: {sha}; independent committed clone; private agent700/model600; original fixture unavailable", flush=True)
         live_check(env, cwd, installed, selector)
     assert not fixture.exists(), "owned source fixture survived"
@@ -306,7 +358,8 @@ def run(selector):
     compatibility = source / "extensions/litellm-bedrock-compat.ts"
     with isolation.isolated_environment(discover_extensions=True) as env:
         agent = Path(env["PI_CODING_AGENT_DIR"])
-        env.update({"UV_OFFLINE": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+        env.update({"UV_OFFLINE": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                    "PI_RLM_PROVIDER_PACKAGE": str(source / "npm/node_modules/pi-provider-litellm")})
         if compatibility.is_file():
             env["PI_RLM_COMPAT_EXTENSION"] = str(compatibility)
         with private_models(source, agent):
