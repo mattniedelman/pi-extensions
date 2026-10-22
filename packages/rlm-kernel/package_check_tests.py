@@ -55,7 +55,7 @@ class RegistrationTests(unittest.TestCase):
         checker = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(checker)
         paths = {"packages/rlm-kernel/" + name for name in
-                 ("permissions.py", "permissions_tests.py", "permissions-probe.mjs")}
+                 ("permissions.py", "permissions_tests.py", "permissions_assembly_tests.py", "permissions-probe.mjs")}
         self.assertTrue(paths <= checker.REQUIRED, "permission oracle missing from required artifact contract")
 
     def test_actual_seven_program_manifest(self):

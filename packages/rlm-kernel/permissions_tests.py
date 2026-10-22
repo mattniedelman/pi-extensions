@@ -22,8 +22,7 @@ class DiagnosticControls(unittest.TestCase):
         ids = [parent + "/1", parent + "/2"]
         args = {"code": permissions.CELL}
         paths = [{"path": "allowed.txt"}, {"path": "denied.txt"}]
-        events = [{"type": "agent_settled", "aborted": False},
-                  {"type": "tool_execution_start", "toolName": "python", "toolCallId": parent, "args": args}]
+        events = [{"type": "tool_execution_start", "toolName": "python", "toolCallId": parent, "args": args}]
         for index, path in enumerate(paths):
             events.append({"type": "tool_execution_start", "toolName": "read", "toolCallId": ids[index],
                            "parentToolCallId": parent, "args": path})
@@ -32,7 +31,8 @@ class DiagnosticControls(unittest.TestCase):
         events.extend([{"type": "tool_execution_end", "toolName": "python", "toolCallId": parent,
                         "isError": False, "result": {"details": {"result": permissions.EXPECTED, "output": "", "truncated": False}}},
                        {"type": "message_end", "message": {"role": "assistant", "provider": "litellm",
-                        "model": "fixture", "stopReason": "stop", "usage": {"totalTokens": 1}}}])
+                        "model": "fixture", "stopReason": "stop", "usage": {"totalTokens": 1}}},
+                       {"type": "agent_settled", "aborted": False}])
         policy = [{"type": "tool_call", "toolName": "python", "toolCallId": parent, "idMatches": True,
                    "argumentMatches": True, "denialReason": "none"}]
         for index, path in enumerate(paths):
@@ -68,27 +68,27 @@ class DiagnosticControls(unittest.TestCase):
         self.assertTrue(report["passed"])
         permissions.assert_report(report)
         mutations = {
-            "settled": lambda r, p: r.events[0].update(aborted=True),
-            "actual_python_arguments": lambda r, p: r.events[1]["args"].update(code="synthetic-secret"),
-            "python_call_count": lambda r, p: r.events.append(r.events[1]),
+            "settled": lambda r, p: r.events[7].update(aborted=True),
+            "actual_python_arguments": lambda r, p: r.events[0]["args"].update(code="synthetic-secret"),
+            "python_call_count": lambda r, p: r.events.append(r.events[0]),
             "execution_counts": lambda r, p: r.events.append({"type": "tool_execution_start", "toolName": "other"}),
-            "nested_ids": lambda r, p: r.events[2].update(toolCallId="wrong"),
-            "nested_arguments": lambda r, p: r.events[2].update(args={"path": "synthetic-secret"}),
-            "nested_parent": lambda r, p: r.events[2].update(parentToolCallId="wrong"),
-            "execution_ends": lambda r, p: r.events.pop(3),
-            "nested_status": lambda r, p: r.events[5].update(isError=False),
-            "allowed_content": lambda r, p: r.events[3].update(result={}),
-            "denial_reason": lambda r, p: r.events[5].update(result={}),
-            "python_status": lambda r, p: r.events[6].update(isError=True),
-            "python_result_envelope": lambda r, p: r.events[6].update(result={"details": {}}),
+            "nested_ids": lambda r, p: r.events[1].update(toolCallId="wrong"),
+            "nested_arguments": lambda r, p: r.events[1].update(args={"path": "synthetic-secret"}),
+            "nested_parent": lambda r, p: r.events[1].update(parentToolCallId="wrong"),
+            "execution_ends": lambda r, p: r.events.pop(2),
+            "nested_status": lambda r, p: r.events[4].update(isError=False),
+            "allowed_content": lambda r, p: r.events[2].update(result={}),
+            "denial_reason": lambda r, p: r.events[4].update(result={}),
+            "python_status": lambda r, p: r.events[5].update(isError=True),
+            "python_result_envelope": lambda r, p: r.events[5].update(result={"details": {}}),
             "hook_calls": lambda r, p: p.pop(0),
             "hook_ids": lambda r, p: p[0].update(idMatches=False),
             "hook_arguments": lambda r, p: p[0].update(argumentMatches=False),
             "hook_denial_reason": lambda r, p: p[2].update(denialReason="none"),
             "hook_results": lambda r, p: p.pop(),
-            "selected_model": lambda r, p: r.events[7]["message"].update(model="synthetic-secret"),
-            "model_status": lambda r, p: r.events[7]["message"].update(stopReason="error"),
-            "model_usage": lambda r, p: r.events[7]["message"].update(usage={}),
+            "selected_model": lambda r, p: r.events[6]["message"].update(model="synthetic-secret"),
+            "model_status": lambda r, p: r.events[6]["message"].update(stopReason="error"),
+            "model_usage": lambda r, p: r.events[6]["message"].update(usage={}),
             "rpc_privacy": lambda r, p: setattr(r, "privacy_ok", False),
             "rpc_protocol": lambda r, p: setattr(r, "protocol_ok", False),
         }

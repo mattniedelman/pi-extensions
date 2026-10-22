@@ -336,6 +336,33 @@ completion gate.
 
 ## Opt-in live permission check
 
+The credential-free assembly regression is a separate narrow command:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 timeout 30s python3 packages/rlm-kernel/permissions_assembly_tests.py
+```
+
+This is synthetic guard proof, NOT actual pi live-policy proof. It runs actual
+`live_check`, binary-pipe `LiveRpc`, Linux inode sensing and the Node hook logger
+with a tiny synthetic host and owned sidecar marker. The host reads the allowed
+fixture only after the actual hook permits it and never executes the blocked
+read. Fixture events settle last; EOF gates final-shutdown faults. Positive,
+late-denied, wrong-argument, provenance, exit, survivor, protocol, privacy and
+startup-observation controls retain all 36 checks and four safe phase slots
+before assertions (unavailable observations are null, not zero). Three private
+in-memory helper mutants prove sensitivity to lost final conjunction, provenance
+and late-denied guards; no real runtime sidecar or provider/config is loaded.
+Owned supervision cleans fixture children even on failure, without signaling an
+unrelated caller sentinel. Model/credential environment variables are not passed.
+This file is required in the package artifact, not added to default npm argv.
+
+The bounded old-order comparison also passes when, as in the copied review
+probe, file IO finishes before any events are emitted. Settled-first was invalid
+fixture chronology, but is NOT an established cause of the earlier positive
+failures. Those failures and the earlier live denied-access observation remain
+unresolved; these offline controls do not certify a runtime fix or unblock the
+separate lifecycle/RSS or durable-repin gates.
+
 The maintained permission oracle is explicit and paid, not part of `npm test`:
 
 ```bash
