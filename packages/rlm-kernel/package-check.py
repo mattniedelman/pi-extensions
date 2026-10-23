@@ -19,6 +19,7 @@ REQUIRED = {
         "python/sidecar.py", "python/pyproject.toml", "python/uv.lock",
         "python/check.py", "python/recovery_check.py", "python/recovery_timeout_check.py",
         "check.mjs", "bridge-check.mjs", "integration.py", "e2e.py",
+        "lifecycle.py", "lifecycle_controls.py", "lifecycle-probe.ts", "lifecycle-replay-probe.ts",
         "permissions.py", "permissions_tests.py", "permissions_assembly_tests.py", "permissions-probe.mjs",
         "permissions_replay.py", "permissions-replay-probe.ts",
         "install-check.py", "index-probe.ts", "installed-probe.ts",

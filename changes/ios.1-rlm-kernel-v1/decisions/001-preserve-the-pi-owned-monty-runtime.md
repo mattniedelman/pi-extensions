@@ -157,6 +157,28 @@ installed-readiness, live-policy or final-suite tasks. Durable clone preparation
 is deferred to `pi-extensions-zog`; personal migration and publication remain
 unapproved.
 
+## User release-gate disposition (2026-10-23)
+
+The user explicitly directed "close576 notconcern/IUAnoblocker".
+`pi-extensions-576` is closed as accepted risk, not fixed; `pi-extensions-iua`
+is open P3 and non-blocking (relates-to only). Historical denied-file inode
+access and unexplained synthetic positive failures remain unknown, not attributed
+or converted into PASS. Preserve strict permission tests and saved evidence;
+do not rerun the diagnostic until green or require its closure to release v1.
+The separately reviewed q1s replay establishes core nested hook ownership without
+claiming to fix that observation. No policy bypass or capability change follows.
+
+The remaining release evidence is the installed lifecycle smoke, isolation/owned
+cleanup, measured broad-suite/live RSS and final durable source repin at the
+reviewed production commit. Offline controls may use fixed local transport and a
+clearly synthetic compaction hook. Live must use the normal configured LiteLLM
+provider and actual non-hook compaction; model selection and read-only selected
+auth access require explicit authorization, with private copies and finally
+source byte equality. An offline PASS is not paid lifecycle proof or task closure.
+Acceptance and exact verification commands remain in `bd show pi-extensions-4px`,
+not duplicated here. Personal installation/migration, publication and merging
+remain separately unapproved.
+
 ## What would change this decision
 
 - A bounded failure test proves the existing checkpoint format cannot support

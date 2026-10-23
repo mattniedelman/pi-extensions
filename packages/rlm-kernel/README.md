@@ -168,7 +168,7 @@ The selected durable source is an ordinary, independent git clone at
 `~/.local/share/pi-extensions/rlm-kernel-v1`, checked out at a reviewed commit.
 Preparing this source does not install it into personal settings. The initial
 runtime preparation is pinned to reviewed `d61eb4fad3bc4f8579b85467c0ba7abca1085a69`;
-after the remaining policy/lifecycle gates, repin the clean clone to the final
+after the remaining lifecycle/live/RSS gates, repin the clean clone to the final
 reviewed production HEAD. Do not describe the initial pin as completed v1.
 No publication is needed. When preparing it intentionally, substitute the
 reviewed full commit ID and an existing local repository path:
@@ -392,8 +392,76 @@ This is fixture isolation, not an OS security sandbox.
 Passing replay does not attribute or fix the historical live denied-access
 observation (9072, denied count 1), or the unexplained synthetic positive
 failures. It does not complete ios.1 or replace the separately gated full
-lifecycle/RSS, paid-policy or final durable-repin checks. Default npm test and
+lifecycle/live/RSS or final durable-repin checks. Default npm test and
 the strict default-test argv contract remain unchanged.
+
+## Installed lifecycle smoke and release disposition
+
+On 2026-10-23 the user directed "close576 notconcern/IUAnoblocker":
+`pi-extensions-576` is closed as accepted risk, NOT fixed. `pi-extensions-iua`
+is an open P3 non-blocking follow-up, with a relates-to edge only. The historical
+live denied-access count 1 and unexplained synthetic positive failures remain
+unattributed; neither is certified PASS. Strict permission oracles and historical
+evidence remain unchanged. Core nested hook ownership has separate q1s replay
+proof. Inode-attribution closure and another paid permission diagnostic are NOT
+release prerequisites. Lifecycle/live/RSS and final reviewed durable repin remain
+required; `4px` and `ios.1` are not complete from offline infrastructure alone.
+
+From the repository root, without credential access or inference:
+
+```bash
+PI_RLM_TEST_MODEL= HINDSIGHT_DISABLED=true timeout 10s python3 packages/rlm-kernel/e2e.py
+PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm-kernel/lifecycle_controls.py
+/usr/bin/time -f 'V1_SUITE elapsed=%e max_rss_kb=%M exit=%x' env HINDSIGHT_DISABLED=true timeout 180s python3 packages/rlm-kernel/isolated-check.py --timeout 120 -- npm test
+```
+
+The default `e2e.py` case is `lifecycle` (`resume` remains an alias); absent model
+selection reports SKIP before any helper import, config/auth copy, installation
+or runtime bootstrap. Missing credentials after opt-in are failures, not skips or
+success. The maintained controls prove early SKIP with unavailable config/runtime,
+seven exact oracle outcomes (including wrong value, boolean false/zero, IDs,
+code, settlement and zero-paid-usage rejection), five RPC framing/deadline cases,
+and the actual installed real-Pi lifecycle through a fixed local stream. Five
+retained-state phases also reject wrong-value expectations against their actual
+RPC events. This is local transport replay, NOT inference. Only the offline
+loader intercepts compaction with a labeled synthetic summary; live never loads
+it. No real model/auth source is read by controls.
+
+Both modes use actual install/list of an independent committed clone, RLM-only
+automatic discovery, private agent/cwd/session/state/venv and owned-process
+supervision. Six bounded Python queries seed x=40 plus the real nested read's doc
+and matches, advance to 42, then query unchanged retained data after runtime
+reload, compaction and process resume. No later query rebuilds variables or
+rereads data. A temporary `ctx.reload()` command must produce a different runtime
+generation with the same session file. A manual compaction uses effective
+keepRecentTokens=256/reserveTokens=4096, and its actual entry must match both RPC
+and persisted session file. A bounded custom-message boundary avoids split-turn
+two-summary compaction; it is fixture context, not generated model evidence.
+Live requires a non-hook provider summary and positive persisted usage. EOF,
+exit0 and zero owned survivors are required BEFORE launching a new process with
+the same session file. A different new session must return NameError. Temporary
+tool hooks guard exact code/count and correlate Python and nested-read IDs;
+unexpected calls cannot execute. A guard aborts an excess assistant continuation.
+No runtime limits, SDK dependency or default npm argv change is involved.
+
+After review, and ONLY with explicit authorization for the exact live command
+and selected source model/auth access:
+
+```bash
+/usr/bin/time -f 'V1_LIVE elapsed=%e max_rss_kb=%M exit=%x' env PI_RLM_TEST_MODEL=litellm/us.openai.gpt-6.1-sol HINDSIGHT_DISABLED=true timeout 180s python3 packages/rlm-kernel/e2e.py
+```
+
+Live reuses the normal configured LiteLLM provider and selected-only private auth
+helper described below. Budget: six prompts with at most two assistant responses
+each, one manual compaction (non-split fixture, one summary request), no retries.
+Prompt settlement and compaction each have 30s deadlines; RPC setup 10s; orderly
+process EOF 5s. The total live worker is capped at 150s plus supervisor cleanup,
+inside the 180s outer guard. Offline worker is capped at 36s, with 12s phase
+limits inside 45s. Reports allow only fixed outcomes, source commit/mode, sanitized
+numeric usage/cost estimates and explicit accepted risks; raw state, model
+headers, provider stderr and transcripts are never printed. Small-fixture
+compaction is not a claim of context savings or performance. Actual live proof,
+measured live RSS and final reviewed clone repin are still pending.
 
 ## Opt-in live permission check
 
@@ -421,8 +489,8 @@ The bounded old-order comparison also passes when, as in the copied review
 probe, file IO finishes before any events are emitted. Settled-first was invalid
 fixture chronology, but is NOT an established cause of the earlier positive
 failures. Those failures and the earlier live denied-access observation remain
-unresolved; these offline controls do not certify a runtime fix or unblock the
-separate lifecycle/RSS or durable-repin gates.
+unresolved; these offline controls do not certify a runtime fix. The user
+accepted the risk on 2026-10-23; it no longer blocks lifecycle/RSS or repin.
 
 The maintained permission oracle is explicit and paid, not part of `npm test`:
 
