@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { injectCachePoints } from "./inject.mjs";
+import { fixHaikuThinking, injectCachePoints, stripTemperature } from "./inject.mjs";
 
 // bedrock-sso: Claude on Amazon Bedrock, handing off to prime-agent's built-in
 // bedrock-converse-stream code, plus two fixes:
@@ -27,6 +27,34 @@ const API = "bedrock-sso-converse";
 const LOGIN_TIMEOUT_MS = 180_000;
 const SSO_ERROR = /aws sso login|sso.{0,40}(expired|invalid|refresh)|token.{0,20}expired|ExpiredToken/i;
 
+const EFFORT = { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" };
+const US_EAST_1 = "https://bedrock-runtime.us-east-1.amazonaws.com";
+// Released before prime-agent's catalog lists them (catalog entries win once added).
+// Prices: Anthropic list price x1.1 for US inference profiles. Haiku 5.5 uses the
+// <=100k-token prompt tier; longer prompts are billed 5x and under-reported here.
+const EXTRA_MODELS = [
+  {
+    id: "us.anthropic.claude-sonnet-5-5",
+    name: "Claude Sonnet 5.5 (US)",
+    cost: { input: 2.2, output: 11, cacheRead: 0.11, cacheWrite: 2.75 },
+  },
+  {
+    id: "us.anthropic.claude-haiku-5-5",
+    name: "Claude Haiku 5.5 (US)",
+    cost: { input: 0.11, output: 0.55, cacheRead: 0.011, cacheWrite: 0.1375 },
+  },
+].map((m) => ({
+  ...m,
+  api: "bedrock-converse-stream",
+  provider: "amazon-bedrock",
+  baseUrl: US_EAST_1,
+  reasoning: true,
+  thinkingLevelMap: EFFORT,
+  input: ["text", "image"],
+  contextWindow: 1_000_000,
+  maxTokens: 128_000,
+})) as unknown as Model<Api>[];
+
 // ponytail: reads prime-agent's cached remote catalog (no extension API exposes it).
 // Falls back to the small built-in stub; switch to an API if one appears.
 function claudeModels(): Model<Api>[] {
@@ -36,7 +64,10 @@ function claudeModels(): Model<Api>[] {
     models = JSON.parse(readFileSync(file, "utf8")).payload.models;
   } catch {}
   if (!models?.length) models = getModels("amazon-bedrock") as Model<Api>[];
-  return models.filter((m) => m.provider === "amazon-bedrock" && m.id.includes("anthropic.claude"));
+  const ids = new Set(models.map((m) => m.id));
+  return [...models, ...EXTRA_MODELS.filter((m) => !ids.has(m.id))].filter(
+    (m) => m.provider === "amazon-bedrock" && m.id.includes("anthropic.claude"),
+  );
 }
 
 export default function (pi: ExtensionAPI) {
@@ -59,6 +90,9 @@ export default function (pi: ExtensionAPI) {
         ...options,
         onPayload: async (payload, m) => {
           injectCachePoints(payload);
+          stripTemperature(payload);
+          const level = options?.reasoning;
+          if (level) fixHaikuThinking(payload, model.thinkingLevelMap?.[level] ?? (level === "minimal" ? "low" : level));
           return (await options?.onPayload?.(payload, m)) ?? payload;
         },
       });
