@@ -6,6 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { SidecarClient } from "./client.mjs";
 import { handleBridgeCall, toolCatalog } from "./bridge.mjs";
+import { renderPythonCall, renderPythonResult } from "./render.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -31,6 +32,8 @@ export default function (pi: ExtensionAPI) {
     label: "Python",
     description: "Run Python-subset code in a persistent, sandboxed Monty session. Globals survive across calls and resumed pi sessions. Python can call current pi tools naturally, for example pi.read(path='README.md') or pi.bash(command='git status'). Use pi.call(name, args) for exact tool names and pi.tools(), pi.search(query), or pi.describe(name) for discovery. Tool effects are real even if later Python code fails. Other operations: variables, reset, checkpoint.",
     exposure: "model-only",
+    renderCall: renderPythonCall,
+    renderResult: renderPythonResult,
     parameters: Type.Object({
       operation: Type.Optional(Type.Union([
         Type.Literal("execute"),

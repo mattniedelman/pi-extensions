@@ -67,6 +67,12 @@ class RegistrationTests(unittest.TestCase):
                  ("lifecycle.py", "lifecycle_controls.py", "lifecycle-probe.ts", "lifecycle-replay-probe.ts")}
         self.assertTrue(paths <= checker.REQUIRED, "lifecycle adapter missing from artifact contract")
 
+    def test_renderer_is_required_in_artifact(self):
+        spec = importlib.util.spec_from_file_location("renderer_artifact_contract", CHECKER)
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        self.assertTrue({"packages/rlm/render.ts", "packages/rlm/render-probe.ts", "packages/rlm/render-check.py"} <= checker.REQUIRED)
+
     def test_self_test_controls_are_required_in_artifact(self):
         spec = importlib.util.spec_from_file_location("self_test_artifact_contract", CHECKER)
         checker = importlib.util.module_from_spec(spec)
@@ -83,11 +89,11 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn('name = "pi-rlm-sidecar"', lock)
         self.assertNotIn('name = "pi-rlm-kernel-sidecar"', project + lock)
         self.assertIn('dependencies = ["pydantic-monty==1.1.0"]', project)
-        self.assertEqual(metadata_for(SCRIPT), "4 extension entries; 3 host peers; 4 kernel test programs")
+        self.assertEqual(metadata_for(SCRIPT), "4 extension entries; 4 host peers; 4 kernel test programs")
 
     def test_actual_seven_program_manifest(self):
         self.assertEqual(len(SCRIPT.split(" && ")), 7)
-        self.assertEqual(metadata_for(SCRIPT), "4 extension entries; 3 host peers; 4 kernel test programs")
+        self.assertEqual(metadata_for(SCRIPT), "4 extension entries; 4 host peers; 4 kernel test programs")
 
     def test_horizontal_whitespace_is_supported(self):
         self.assertEqual(metadata_for("\t" + SCRIPT.replace(" ", "\t") + "  "),

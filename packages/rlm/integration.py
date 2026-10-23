@@ -139,6 +139,7 @@ def pi_check(env, cwd, probe, output, mode, injected=False):
             assert "error" not in result, result
             if injected:
                 assert result["passed"] == 24 and result["wiringOnly"] is True, result
+                assert result["rendering"] == 10, result
             else:
                 assert result["name"] == "python" and result["exposure"] == "model-only", result
                 assert "pi.read" in result["description"], result
@@ -177,7 +178,7 @@ def pi_check(env, cwd, probe, output, mode, injected=False):
             proc.stdout.close()
 
 
-RUNTIME_FILES = ("index.ts", "client.mjs", "bridge.mjs", "python/sidecar.py",
+RUNTIME_FILES = ("index.ts", "render.ts", "client.mjs", "bridge.mjs", "python/sidecar.py",
                  "python/pyproject.toml", "python/uv.lock")
 
 

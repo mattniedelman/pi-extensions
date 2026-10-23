@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import factory from "./index.ts";
+import { renderingChecks } from "./render-probe.ts";
 
 function identity(pid) {
   try {
@@ -237,7 +238,7 @@ export default function (host) {
           await stop(); await stop(); retired(old);
           await assert.rejects(invoke({ code: "42" }), /kernel has not started/);
         });
-        writeFileSync(output, JSON.stringify({ passed, wiringOnly: true, cleanup: "old identities absent BEFORE backup" }));
+        writeFileSync(output, JSON.stringify({ passed, rendering: renderingChecks().passed, wiringOnly: true, cleanup: "old identities absent BEFORE backup" }));
       } catch (error) {
         writeFileSync(output, JSON.stringify({ error: error.stack, passed }));
       } finally {

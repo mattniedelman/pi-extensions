@@ -44,7 +44,7 @@ run on Linux x86_64 with Node 26.11.1, CPython 3.13.16, uv 0.12.23 and the
 Monty 1.1.0 dependency lock. The package declares Node >=22 and the sidecar declares
 Python >=3.10; these minima are dependency constraints, not proof of every version
 or platform. Earlier/later pi releases and other platforms are not claimed tested.
-Host-provided pi packages and `typebox` are unbundled `"*"` peers per pi's package
+Host-provided pi packages, `pi-tui` and `typebox` are unbundled `"*"` peers per pi's package
 contract; that peer range is not an API compatibility guarantee.
 
 Read the [kernel operational contract](packages/rlm/README.md) before use:

@@ -13,7 +13,7 @@ KERNEL = "packages/rlm/"
 REQUIRED = {
     "package.json", "README.md",
     *(KERNEL + path for path in (
-        "README.md", "index.ts", "client.mjs", "bridge.mjs", "package-check.py",
+        "README.md", "index.ts", "render.ts", "render-probe.ts", "render-check.py", "client.mjs", "bridge.mjs", "package-check.py",
         "package_check_tests.py",
         "python/sidecar.py", "python/pyproject.toml", "python/uv.lock",
         "python/check.py", "python/recovery_check.py", "python/recovery_timeout_check.py",
@@ -25,7 +25,7 @@ REQUIRED = {
         "isolated-check.py", "isolated_check_tests.py", "self_test_controls.py",
     )),
 }
-HOST_PACKAGES = {"@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "typebox"}
+HOST_PACKAGES = {"@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "@earendil-works/pi-tui", "typebox"}
 STATE_FILES = ("kernel.bin", "kernel.names.json", "kernel.names.tmp", "kernel.tmp", "kernel.corrupt")
 # Only this literal executable chain is supported, not arbitrary shell syntax.
 TEST_ARGV = tuple(tuple(program.split()) for program in (
@@ -71,7 +71,7 @@ def metadata():
     assert all(peers.get(name) == "*" for name in HOST_PACKAGES), "host peers must use *"
     assert not HOST_PACKAGES.intersection(package.get("dependencies", {})), "host packages bundled"
     test_registration(package.get("scripts", {}).get("test"))
-    return f"{len(entries)} extension entries; 3 host peers; 4 kernel test programs"
+    return f"{len(entries)} extension entries; 4 host peers; 4 kernel test programs"
 
 
 def documentation():

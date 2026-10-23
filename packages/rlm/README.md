@@ -41,7 +41,7 @@ The venv is shared by sessions under a state root. Do not delete or resynchroniz
 it while any of those sessions are running. For a damaged environment, stop all
 such sessions, remove only the venv as described under cleanup, and bootstrap
 again from the reviewed locked package. pi supplies its host packages and
-`typebox`; they are unbundled `"*"` peers, not additional runtime installations.
+`pi-tui` and `typebox`; they are unbundled `"*"` peers, not additional runtime installations.
 
 ## Pi tools from Python
 
@@ -70,6 +70,20 @@ Python state rolls back when execution fails; completed pi-tool effects do not.
 For example, a successful `pi.write(...)` remains on disk even if later Python
 code raises an exception. A request timeout or abort may kill the sidecar; a
 subsequent request starts it again and restores the persisted checkpoint.
+
+## Tool display
+
+In pi, Python calls show a syntax-highlighted preview and operation/line count.
+The compact view bounds code and output; use pi's normal tool expansion action
+to see the full code and available output. Stdout is displayed directly, with
+valid JSON formatted for reading, separately from a non-null expression result.
+Empty envelope fields are hidden. Errors and kernel truncation stay visible;
+expansion cannot recover output already truncated by the kernel.
+
+This rendering does not change the model-facing result or checkpoint behavior.
+The no-model renderer check runs in the default integration suite; it can also
+run separately from the root with `PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true
+timeout 20s python3 packages/rlm/render-check.py`.
 
 ## Operations and limits
 
@@ -276,7 +290,7 @@ timeout 15s node packages/rlm/bridge-check.mjs
 
 `install-check.py` is an explicit distribution check, not an added default npm
 command. It clones the current committed HEAD twice with copied Git objects,
-detaches the independent installed checkout, verifies all six runtime/lock files
+detaches the independent installed checkout, verifies all seven runtime/lock files
 and the manifest against committed blobs, and renames only its owned original
 fixture. Dirty/uncommitted runtime or original-file aliases fail. Actual pi
 install/list creates the private settings declaration; only then does an RLM-only
@@ -299,7 +313,7 @@ unbundled host peers, and the unchanged strict default-test argv contract.
 
 The installed selector uses private package settings and RLM-only resource filters,
 not `--extension` pointing at the original index. Without `--installed-root`, it
-copies the manifest and six runtime/lock files into an independent owned fixture.
+copies the manifest and seven runtime/lock files into an independent owned fixture.
 With the selector, it discovers the given independent package root in private
 settings; this is a reusable readiness oracle, not proof of install/list/remove
 (the separate distribution gate owns those CLI operations). It rejects original
