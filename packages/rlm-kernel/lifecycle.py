@@ -154,6 +154,7 @@ def prompt(rpc, phase, value, selector, log, *, replay=False, nested=False, isol
     while not any(e.get("type") == "agent_settled" for e in rpc.events[offset:]):
         rpc.pump(deadline)
     events = rpc.events[offset:]
+    configured(rpc)
     parent = assert_cell(events, code, value, nested=nested, isolated=isolated)
     if replay and not isolated:
         # Exercise the actual captured RPC events against a wrong restore oracle.
