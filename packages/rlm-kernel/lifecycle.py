@@ -175,6 +175,11 @@ def prompt(rpc, phase, value, selector, log, *, replay=False, nested=False, isol
                   and e.get("message", {}).get("role") == "assistant"]
     assert_usage(assistants, selector, replay=replay)
     configured(rpc)
+    print("lifecycle phase: " + json.dumps({"phase": phase, "hookCalls": len(calls), "hookResults": len(results),
+        "executionStarts": sum(e.get("type") == "tool_execution_start" for e in events),
+        "executionEnds": sum(e.get("type") == "tool_execution_end" for e in events),
+        "exactArgumentsAndIds": "PASS", "allCallsAccepted": "PASS",
+        "wrongRestoreRejected": replay and not isolated}, sort_keys=True), flush=True)
     return assistants
 
 
@@ -220,6 +225,7 @@ def direct_read_control(env, cwd, argv, selector, log):
             calls = [e for e in observed if e.get("type") == "call"]
             results = [e for e in observed if e.get("type") == "result"]
             ends = [e for e in events if e.get("type") == "tool_execution_end"]
+            starts = [e for e in events if e.get("type") == "tool_execution_start"]
             assistants = [e["message"] for e in events if e.get("type") == "message_end"
                           and e.get("message", {}).get("role") == "assistant"]
             assert_usage(assistants, selector, replay=True)
@@ -228,11 +234,14 @@ def direct_read_control(env, cwd, argv, selector, log):
                 "directHookBlocked": len(calls) == 1 and calls[0].get("toolName") == "read"
                     and calls[0].get("match") is False,
                 "noPythonParent": not any(e.get("toolName") == "python" for e in observed)
-                    and len(ends) == 1 and ends[0].get("parentToolCallId") is None,
-                "errorResult": len(results) == len(ends) == 1
-                    and results[0] == {"type": "result", "toolName": "read", "id": call_id, "isError": True}
+                    and len(starts) == len(ends) == 1 and starts[0].get("toolName") == "read"
+                    and starts[0].get("args") == {"path": "large.txt"}
+                    and starts[0].get("toolCallId") == call_id
+                    and starts[0].get("parentToolCallId") is None and ends[0].get("parentToolCallId") is None,
+                "errorResult": not results and len(ends) == 1
+                    and ends[0].get("toolName") == "read" and "durationMs" not in ends[0]
                     and ends[0].get("toolCallId") == call_id and ends[0].get("isError") is True,
-                "guardReason": len(ends) == 1 and "Unexpected lifecycle" in json.dumps(ends[0].get("result")),
+                "guardReason": len(ends) == 1 and "Unexpected lifecycle read: requires accepted seed Python parent and exact nested ID" in json.dumps(ends[0].get("result")),
                 "noEndContent": not p.contains_sentinel(events, DOC)
                     and not p.contains_sentinel(events, "needle one") and not p.contains_sentinel(events, "needle two"),
                 "noBuiltinAccess": all(value == {"large.txt": 0} for value in phases.values()),
@@ -243,7 +252,7 @@ def direct_read_control(env, cwd, argv, selector, log):
                 "checks": {key: "PASS" if value else "FAIL" for key, value in checks.items()},
                 "sensorPhases": phases, "hookCalls": len(calls), "hookResults": len(results),
                 "hookMatch": calls[0].get("match") if len(calls) == 1 else None,
-                "executionEnds": len(ends), "assistantResponses": len(assistants),
+                "executionStarts": len(starts), "executionEnds": len(ends), "assistantResponses": len(assistants),
                 "ownedProcesses": len(owned.observed), "survivorsBeforeBackup": len(owned.remaining()),
                 "mode": "offline-local-replay-NOT-inference"}, sort_keys=True), flush=True)
             require(all(checks.values()))
@@ -352,6 +361,8 @@ def lifecycle_check(env, cwd, installed, selector, *, replay=False):
         "pythonQueries": 6, "assistantResponses": len(assistants), "nestedReads": 1, "compactions": 1,
         "compactionSource": "synthetic-hook-NOT-paid-proof" if replay else "actual-provider",
         "phases": {name: "PASS" for name in ("seed40", "advance42", "reload", "compact", "resume", "isolation")},
+        "stateModes": {"session": "0700", "checkpoint": "0600", "names": "0600"},
+        "wrongRestoreRejections": 5 if replay else 0,
         "ownedProcesses": observed_count, "survivorsBeforeResume": 0, "survivorsBeforeBackup": 0,
         "usage": usage, "costLabel": "provider-reported estimate; small fixture is not performance savings",
         "acceptedRisks": {"576": "closed-accepted-risk-not-fixed", "IUA": "open-P3-nonblocking-unknown"}}, sort_keys=True), flush=True)

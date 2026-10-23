@@ -412,6 +412,8 @@ From the repository root, without credential access or inference:
 ```bash
 PI_RLM_TEST_MODEL= HINDSIGHT_DISABLED=true timeout 10s python3 packages/rlm-kernel/e2e.py
 PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm-kernel/lifecycle_controls.py
+# Focus only the actual-host direct-read negative:
+PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm-kernel/lifecycle_controls.py --negative direct-read
 /usr/bin/time -f 'V1_SUITE elapsed=%e max_rss_kb=%M exit=%x' env HINDSIGHT_DISABLED=true timeout 180s python3 packages/rlm-kernel/isolated-check.py --timeout 120 -- npm test
 ```
 
@@ -421,9 +423,16 @@ or runtime bootstrap. Missing credentials after opt-in are failures, not skips o
 success. The maintained controls prove early SKIP with unavailable config/runtime,
 seven exact oracle outcomes (including wrong value, boolean false/zero, IDs,
 code, settlement and zero-paid-usage rejection), five RPC framing/deadline cases,
-and the actual installed real-Pi lifecycle through a fixed local stream. Five
-retained-state phases also reject wrong-value expectations against their actual
-RPC events. This is local transport replay, NOT inference. Only the offline
+and the actual installed real-Pi lifecycle through a fixed local stream. First,
+the same transport issues a direct `read(path="large.txt")` in the seed phase
+without a Python parent. The actual hook must reject it before builtin execution:
+one rejected call, no tool-result hook, one error execution-end with the specific
+guard reason and no execution duration, no returned fixture content, cumulative
+IN_ACCESS zero at startup/before-prompt/settled/shutdown, and zero owned survivors
+before backup. This is a separate owned host, not fabricated execution events.
+Five retained-state phases also reject wrong-value expectations against their actual
+RPC events; all six phases report verified hook/start/end counts and exact IDs.
+This is local transport replay, NOT inference. Only the offline
 loader intercepts compaction with a labeled synthetic summary; live never loads
 it. No real model/auth source is read by controls.
 
@@ -440,8 +449,12 @@ two-summary compaction; it is fixture context, not generated model evidence.
 Live requires a non-hook provider summary and positive persisted usage. EOF,
 exit0 and zero owned survivors are required BEFORE launching a new process with
 the same session file. A different new session must return NameError. Temporary
-tool hooks guard exact code/count and correlate Python and nested-read IDs;
-unexpected calls cannot execute. A guard aborts an excess assistant continuation.
+tool hooks guard exact code/count and correlate Python and nested-read IDs.
+Only the accepted seed Python call's exact `<toolCallId>/1` may read `large.txt`,
+using pi 1.1.0's documented nested-ID contract rather than assuming a parent
+field on the hook. The accepted ID is cleared at Python result and every prompt;
+a path/phase match alone cannot authorize a read. Unexpected calls cannot execute.
+A guard aborts an excess assistant continuation.
 No runtime limits, SDK dependency or default npm argv change is involved.
 
 After review, and ONLY with explicit authorization for the exact live command
