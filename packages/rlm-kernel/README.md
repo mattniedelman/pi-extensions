@@ -325,6 +325,48 @@ methods, 13 failure scenarios, 28 fresh-process restores and bounded group/child
 timings. Passing these commands does not identify the cause of the earlier
 20s aggregate overrun.
 
+The isolation runner self-test has 29 named independent logical scenarios:
+14 isolation/environment/command cases, three outer-signal cases and 12
+safety/after-exit cases. Each runs serially in a fresh supervised process with
+private fixtures, synthetic poison configuration and an unrelated sentinel.
+Original operation/readiness guards and signal/error precedence are unchanged.
+`--list-cases` emits JSON names and per-case budgets without creating fixtures;
+`--self-test-budget` returns an inert integer total for the selected cases.
+Unknown/duplicate selectors and missing/duplicate/unknown registrations fail
+before execution. Only 29 original unique successful executions with distinct
+fixture/process identities qualify for full PASS; a selected subset is labeled
+"not full-suite PASS". Failure stops dispatch and lists remaining unrun cases.
+
+Run from the repository root, offline with the existing cached dependencies:
+
+```bash
+export PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true
+budget=$(python3 packages/rlm-kernel/isolated-check.py --self-test-budget)
+timeout "$((budget + 3))s" python3 packages/rlm-kernel/isolated-check.py --self-test
+name=tree-exit7
+budget=$(python3 packages/rlm-kernel/isolated-check.py --self-test-budget --case "$name")
+timeout "$((budget + 3))s" python3 packages/rlm-kernel/isolated-check.py --case "$name"
+timeout 20s python3 packages/rlm-kernel/self_test_controls.py
+# Validate 29 actual CASE_RESULT records in a saved full self-test log:
+timeout 20s python3 packages/rlm-kernel/self_test_controls.py --verify-log /path/to/self-test.log
+timeout 10s python3 packages/rlm-kernel/isolated_check_tests.py packages/rlm-kernel/isolated-check.py --capture-only
+timeout 10s python3 packages/rlm-kernel/isolated_check_tests.py packages/rlm-kernel/isolated-check.py --active-only
+```
+
+Case budgets cover the existing operation guard, 3s supervision cleanup, 1s
+fixture setup and the original 2s sentinel teardown; ownership probes also
+allow their original readiness/wait/teardown guards. The total is the sum of
+selected case budgets plus 3s per-case supervision and 1s suite setup (currently
+375s for all 29); the enclosing outer guard adds the existing 3s allowance.
+This replaces the old aggregate 15s internal/20s outer self-test command, not a
+performance promise or a change to any operation timeout. The recorded earlier
+15.523s/exit124 failure remains historical evidence, not a runtime-fix claim.
+Eight retained dispatch controls exercise fail-closed inventory/ledger handling,
+actual selected cases, synthetic process exit7/timeout124/missing-receipt125,
+and parent TERM cleanup without killing an unrelated caller child. Positive
+all-29 independence evidence comes from the actual full execution log, not mocks.
+Capture-only and active-only remain separate, including recovery's capture hook.
+
 Use the [root isolated testing commands](../../README.md#test). The broader
 full-suite guard is unchanged and must be evaluated at the completion gate.
 The default suite covers sidecar, bridge, client, checkpoint-write failures and
