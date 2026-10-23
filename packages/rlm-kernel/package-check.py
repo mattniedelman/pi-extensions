@@ -23,7 +23,7 @@ REQUIRED = {
         "permissions.py", "permissions_tests.py", "permissions_assembly_tests.py", "permissions-probe.mjs",
         "permissions_replay.py", "permissions-replay-probe.ts",
         "install-check.py", "index-probe.ts", "installed-probe.ts",
-        "isolated-check.py", "isolated_check_tests.py",
+        "isolated-check.py", "isolated_check_tests.py", "self_test_controls.py",
     )),
 }
 HOST_PACKAGES = {"@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "typebox"}

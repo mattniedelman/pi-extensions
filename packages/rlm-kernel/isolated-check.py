@@ -2,6 +2,8 @@
 """Run Linux baseline checks with private pi config and bounded owned cleanup.
 
 Usage: isolated-check.py --self-test
+       isolated-check.py --case tree-exit7
+       isolated-check.py --list-cases | --self-test-budget [--case NAME]
        isolated-check.py --timeout 120 -- npm test
 
 The command retains the caller's cwd; pi (via PATH and PI_BIN) runs in a private
@@ -346,16 +348,40 @@ def main():
         return supervise(**request)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--case", action="append", metavar="NAME", help="run only named independent self-test scenarios")
+    parser.add_argument("--list-cases", action="store_true", help="inert JSON inventory and selected total budget")
+    parser.add_argument("--self-test-budget", action="store_true", help="inert integer selected budget for an outer TERM guard")
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
-    if args.self_test:
+    if args.self_test or args.case or args.list_cases or args.self_test_budget:
         if args.command:
-            parser.error("--self-test does not take a command")
-        # Own the whole fixture process as well: an outer guard firing between
-        # individual checks must not orphan the self-test's sentinel/fixtures.
-        return run_owned([sys.executable, str(Path(__file__).with_name("isolated_check_tests.py").resolve()),
-                          str(Path(__file__).resolve())], cwd=Path.cwd(), env=dict(os.environ), timeout=15)
+            parser.error("self-test selectors do not take a command")
+        if args.list_cases and args.self_test_budget:
+            parser.error("choose either --list-cases or --self-test-budget")
+        import isolated_check_tests as tests
+        try:
+            selected = tests.select_cases(args.case)
+        except ValueError as error:
+            parser.error(str(error))
+        budget = tests.total_budget(selected)
+        if args.self_test_budget:
+            print(budget)
+            return 0
+        if args.list_cases:
+            print(json.dumps({"cases": [{"name": case[0], "budgetSeconds": case[1]} for case in selected],
+                              "totalBudgetSeconds": budget, "cleanupAllowanceSeconds": tests.CLEANUP_ALLOWANCE}))
+            return 0
+        # Own the dispatcher as well: parent TERM cannot orphan current fixtures
+        # or touch unrelated caller children. Every case has its own supervisor.
+        command = [sys.executable, str(Path(tests.__file__).resolve()), str(Path(__file__).resolve())]
+        if args.case:
+            command += ["--selected", *args.case]
+        # Enclosing filesystem backup also survives dispatcher interruption.
+        # Successful cases must prove their own absence before this backup.
+        with tempfile.TemporaryDirectory(prefix="pi-self-suite-") as directory:
+            print("SUITE_SCOPE " + directory, flush=True)
+            return run_owned(command, cwd=Path.cwd(), env={**os.environ, "TMPDIR": directory}, timeout=budget)
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("--timeout must be finite and positive")
     if not args.command or args.command[0] != "--" or len(args.command) == 1:

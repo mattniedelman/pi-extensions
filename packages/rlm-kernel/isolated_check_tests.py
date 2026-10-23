@@ -1,5 +1,6 @@
 """Tiny executable fixtures for isolated-check.py; no model or Monty probes."""
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -336,33 +337,6 @@ assert status == expected, (status, expected)
 """
 
 
-def safety_probes(runner, root, fake_pi):
-    failures = []
-    cases = [(case, 'caller', signal.SIGTERM) for case in ('thread', 'termfork')]
-    cases += [('late', target, sig) for target in ('caller', 'supervisor')
-              for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)]
-    cases += [(case, 'caller', signal.SIGTERM) for case in ('exit125', 'cleanup125')]
-    for index, (case, target, sig) in enumerate(cases):
-        directory = root / ('safety-' + str(index))
-        directory.mkdir()
-        (directory / 'safety-tree.py').write_text(SAFETY_TREE)
-        # A dedicated outer supervisor provides bounded fixture-only backup on
-        # assertion/readiness failure. The guard proves absence BEFORE it exits.
-        status = runner.run_owned([sys.executable, '-c', SAFETY_GUARD, runner.__file__,
-                                  str(directory), case, target, str(int(sig))], cwd=root,
-                                 env={**os.environ, 'PI_BIN': str(fake_pi)}, timeout=5)
-        if status != 0:
-            failures.append((case, target, sig.name, status))
-    for command_status in (0, 125):
-        status = runner.run_owned([sys.executable, '-c', CALLER_EXIT_GUARD, runner.__file__,
-                                  str(command_status)], cwd=root,
-                                 env={**os.environ, 'PI_BIN': str(fake_pi)}, timeout=3)
-        if status != 0:
-            failures.append(('caller-exit', command_status, status))
-    assert not failures, failures
-    return len(cases) + 2
-
-
 def capture_probes(runner):
     """File-backed streams must retain output without pipe/deadline deadlocks."""
     with tempfile.TemporaryDirectory(prefix="pi-owned-capture-") as directory:
@@ -469,91 +443,7 @@ def active_reaping_probe(runner):
     print("isolated-check active-reaping: 1 check passed", flush=True)
 
 
-def self_test(runner):
-    count = 0
-    started = time.monotonic()
-    ownership_probe(runner)
-    dynamic_ownership_probe(runner)
-    real_pi_probe(runner)
-    count += 3
-    with tempfile.TemporaryDirectory(prefix="pi-isolated-self-test-") as directory:
-        root = Path(directory)
-        fake_pi = root / "fake-pi"
-        fake_pi.write_text(f"#!{sys.executable}\n" + "import json,os,sys\nfrom pathlib import Path\n" +
-            "Path(sys.argv[-1]).write_text(json.dumps({'argv':sys.argv[1:-1], 'cwd':os.getcwd(), 'env':dict(os.environ)}))\n")
-        fake_pi.chmod(0o700)
-        poison = root / "personal"
-        poison.mkdir()
-        (poison / "settings.json").write_text('{"packages":["must-not-load"]}')
-        original = (poison / "settings.json").read_bytes()
-        source = {**os.environ, "PI_BIN": str(fake_pi), "PI_CODING_AGENT_DIR": str(poison),
-                  "PI_SESSION_FILE": "personal-checkpoint", "OPENAI_API_KEY": "must-not-leak",
-                  "AWS_PROFILE": "must-not-leak", "NODE_OPTIONS": "must-not-load"}
-        with runner.isolated_environment(source) as env:
-            private = Path(env["PI_CODING_AGENT_DIR"]).parent
-            keys = ["PI_CODING_AGENT_DIR", "PI_RLM_STATE_DIR", "PI_CODING_AGENT_SESSION_DIR"]
-            assert len({env[k] for k in keys}) == 3
-            for key in keys:
-                path = Path(env[key])
-                assert path.is_relative_to(private) and path.stat().st_mode & 0o777 == 0o700
-                assert not list(path.iterdir())
-            assert env["HINDSIGHT_DISABLED"] == "true" and env["PI_OFFLINE"] == "1"
-            assert all(key not in env for key in ["PI_SESSION_FILE", "OPENAI_API_KEY", "AWS_PROFILE", "NODE_OPTIONS"])
-            assert env["UV_CACHE_DIR"] == source.get("UV_CACHE_DIR", str(Path(source.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "uv"))
-            assert Path(env["UV_PROJECT_ENVIRONMENT"]).is_relative_to(private)
-            report = root / "cwd.json"
-            code = "import os; from pathlib import Path; Path(%r).write_text(os.getcwd())" % str(report)
-            assert runner.run_owned([sys.executable, "-c", code], cwd=root, env=env, timeout=2) == 0
-            assert report.read_text() == str(root), "caller cwd must be preserved for npm"
-            count += 1
-            pi_report = root / "pi.json"
-            assert runner.run_owned(["pi", "--extension", "/explicit/index.ts", str(pi_report)], cwd=root, env=env, timeout=2) == 0
-            result = json.loads(pi_report.read_text())
-            assert Path(result["cwd"]).is_relative_to(private) and result["cwd"] != str(root)
-            for flag in ["--no-extensions", "--no-context-files", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-themes", "--offline"]:
-                assert flag in result["argv"]
-            assert result["argv"][-2:] == ["--extension", "/explicit/index.ts"]
-            assert result["env"]["PI_CODING_AGENT_DIR"] == env["PI_CODING_AGENT_DIR"]
-            count += 1
-            # Nested fixtures must replace wrapper flags and cwd, not inherit
-            # the outer explicit-only policy when private discovery is requested.
-            for discover in (False, True):
-                with runner.isolated_environment(env, discover_extensions=discover) as nested:
-                    nested_root = Path(nested["PI_CODING_AGENT_DIR"]).parent
-                    nested_report = root / f"nested-{discover}.json"
-                    assert runner.run_owned([nested["PI_BIN"], str(nested_report)], cwd=root, env=nested, timeout=2) == 0
-                    data = json.loads(nested_report.read_text())
-                    assert data["cwd"] == str(nested_root / "cwd")
-                    assert ("--no-extensions" in data["argv"]) is (not discover), data
-                    assert data["env"]["PI_CODING_AGENT_DIR"] == nested["PI_CODING_AGENT_DIR"]
-                    assert nested_root != private
-                assert not nested_root.exists()
-                count += 1
-            # This sentinel is owned by the test, not the command under test.
-            sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
-            try:
-                for mode, expected in [("success", 0), ("exit7", 7), ("failure", 1), ("eof", 0), ("hang", 124)]:
-                    record = root / mode
-                    before = time.monotonic()
-                    status = runner.run_owned([sys.executable, "-c", TREE, str(record), mode], cwd=root, env=env, timeout=.5 if mode == "hang" else 2)
-                    assert status == expected, (mode, status)
-                    assert time.monotonic() - before < 3, mode
-                    assert_gone(record)
-                    assert sentinel.poll() is None, "cleanup touched an unrelated process group"
-                    count += 1
-                assert runner.run_owned([str(root / "missing-command")], cwd=root, env=env, timeout=1) == 127
-                count += 1
-            finally:
-                sentinel.terminate()
-                sentinel.wait(timeout=2)
-        assert not private.exists(), "private directories survived cleanup"
-        assert (poison / "settings.json").read_bytes() == original
-        count += 1
-        # Check *before* the surrounding runner's backup cleanup, so a broken
-        # nested runner cannot pass merely because the outer runner rescued it.
-        fixture = root / "tree.py"
-        fixture.write_text(TREE)
-        guard = """
+OUTER_SIGNAL_GUARD = """
 import json, os, signal, subprocess, sys, time
 from pathlib import Path
 record = Path(sys.argv[1])
@@ -571,18 +461,284 @@ pids = [int(record.read_text()), int(Path(str(record) + '.child').read_text())]
 assert all(not Path('/proc/' + str(pid)).exists() for pid in pids), pids
 assert not Path(Path(str(record) + '.env').read_text()).parent.exists(), 'runner private directories survived'
 """
-        for sig, expected in [("TERM", 124), ("INT", 130), ("HUP", 129)]:
-            record = root / ("guard-" + sig)
-            command = [sys.executable, str(Path(runner.__file__).resolve()), "--timeout", "10", "--",
-                       sys.executable, str(fixture), str(record), "hang"]
-            if sig == "TERM":
-                command = ["timeout", "--kill-after=3s", "0.7s", *command]
-            assert runner.run_owned([sys.executable, "-c", guard, str(record), *command], cwd=root,
-                                    env={**os.environ, "PI_BIN": str(fake_pi), "EXPECTED_STATUS": str(expected)}, timeout=6) == 0
-            assert_gone(record)
-            count += 1
-        count += safety_probes(runner, root, fake_pi)
-    print(f"isolated-check self-test: {count} checks passed in {time.monotonic() - started:.2f}s", flush=True)
+
+
+def environment_case(runner, root, env, private, _parameter, source):
+    keys = ["PI_CODING_AGENT_DIR", "PI_RLM_STATE_DIR", "PI_CODING_AGENT_SESSION_DIR"]
+    assert len({env[k] for k in keys}) == 3
+    for key in keys:
+        path = Path(env[key])
+        assert path.is_relative_to(private) and path.stat().st_mode & 0o777 == 0o700
+        assert not list(path.iterdir())
+    assert env["HINDSIGHT_DISABLED"] == "true" and env["PI_OFFLINE"] == "1"
+    assert all(key not in env for key in ["PI_SESSION_FILE", "OPENAI_API_KEY", "AWS_PROFILE", "NODE_OPTIONS"])
+    assert env["UV_CACHE_DIR"] == source.get("UV_CACHE_DIR", str(Path(source.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "uv"))
+    assert Path(env["UV_PROJECT_ENVIRONMENT"]).is_relative_to(private)
+    report = root / "cwd.json"
+    code = "import os; from pathlib import Path; Path(%r).write_text(os.getcwd())" % str(report)
+    assert runner.run_owned([sys.executable, "-c", code], cwd=root, env=env, timeout=2) == 0
+    assert report.read_text() == str(root), "caller cwd must be preserved for npm"
+
+
+def wrapper_case(runner, root, env, private, discover, source):
+    if discover is None:
+        pi_report = root / "pi.json"
+        assert runner.run_owned(["pi", "--extension", "/explicit/index.ts", str(pi_report)], cwd=root, env=env, timeout=2) == 0
+        result = json.loads(pi_report.read_text())
+        assert Path(result["cwd"]).is_relative_to(private) and result["cwd"] != str(root)
+        for flag in ["--no-extensions", "--no-context-files", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-themes", "--offline"]:
+            assert flag in result["argv"]
+        assert result["argv"][-2:] == ["--extension", "/explicit/index.ts"]
+        assert result["env"]["PI_CODING_AGENT_DIR"] == env["PI_CODING_AGENT_DIR"]
+    else:
+        with runner.isolated_environment(env, discover_extensions=discover) as nested:
+            nested_root = Path(nested["PI_CODING_AGENT_DIR"]).parent
+            nested_report = root / f"nested-{discover}.json"
+            assert runner.run_owned([nested["PI_BIN"], str(nested_report)], cwd=root, env=nested, timeout=2) == 0
+            data = json.loads(nested_report.read_text())
+            assert data["cwd"] == str(nested_root / "cwd")
+            assert ("--no-extensions" in data["argv"]) is (not discover), data
+            assert data["env"]["PI_CODING_AGENT_DIR"] == nested["PI_CODING_AGENT_DIR"]
+            assert nested_root != private
+        assert not nested_root.exists()
+
+
+def probe_case(runner, root, env, private, probe, source):
+    {"ownership": ownership_probe, "dynamic": dynamic_ownership_probe,
+     "real-pi": real_pi_probe}[probe](runner)
+
+
+def tree_case(runner, root, env, private, mode, source):
+    expected = {"success": 0, "exit7": 7, "failure": 1, "eof": 0, "hang": 124}[mode]
+    record = root / mode
+    before = time.monotonic()
+    status = runner.run_owned([sys.executable, "-c", TREE, str(record), mode],
+                             cwd=root, env=env, timeout=.5 if mode == "hang" else 2)
+    assert status == expected, (mode, status)
+    assert time.monotonic() - before < 3, mode
+    assert_gone(record)
+
+
+def missing_case(runner, root, env, private, parameter, source):
+    assert runner.run_owned([str(root / "missing-command")], cwd=root, env=env, timeout=1) == 127
+
+
+def removal_case(runner, root, env, private, parameter, source):
+    # Removal and poison equality are asserted after leaving the private scope.
+    assert private.exists()
+
+
+def outer_signal_case(runner, root, env, private, sig, source):
+    expected = {"TERM": 124, "INT": 130, "HUP": 129}[sig]
+    fixture = root / "tree.py"
+    fixture.write_text(TREE)
+    record = root / ("guard-" + sig)
+    command = [sys.executable, str(Path(runner.__file__).resolve()), "--timeout", "10", "--",
+               sys.executable, str(fixture), str(record), "hang"]
+    if sig == "TERM":
+        command = ["timeout", "--kill-after=3s", "0.7s", *command]
+    assert runner.run_owned([sys.executable, "-c", OUTER_SIGNAL_GUARD, str(record), *command],
+                            cwd=root, env={**env, "EXPECTED_STATUS": str(expected)}, timeout=6) == 0
+    assert_gone(record)
+
+
+def safety_case(runner, root, env, private, parameter, source):
+    case, target, sig = parameter
+    directory = root / "safety"
+    directory.mkdir()
+    (directory / "safety-tree.py").write_text(SAFETY_TREE)
+    assert runner.run_owned([sys.executable, "-c", SAFETY_GUARD, runner.__file__,
+                            str(directory), case, target, str(int(sig))],
+                           cwd=root, env=env, timeout=5) == 0, parameter
+
+
+def caller_exit_case(runner, root, env, private, command_status, source):
+    assert runner.run_owned([sys.executable, "-c", CALLER_EXIT_GUARD, runner.__file__,
+                            str(command_status)], cwd=root, env=env, timeout=3) == 0
+
+
+# Fixed original logical inventory, independently repeated in dispatch controls.
+ORIGINAL_NAMES = (
+    "unrelated-adoption", "dynamic-unrelated-adoption", "real-pi-poison-isolation",
+    "environment-caller-cwd", "explicit-wrapper", "nested-explicit-wrapper",
+    "nested-discovery-wrapper", "tree-success", "tree-exit7", "tree-failure",
+    "tree-eof", "tree-hang", "missing-command", "private-root-poison-unchanged",
+    "outer-TERM", "outer-INT", "outer-HUP", "safety-thread", "safety-termfork",
+    "late-caller-TERM", "late-caller-INT", "late-caller-HUP",
+    "late-supervisor-TERM", "late-supervisor-INT", "late-supervisor-HUP",
+    "exit125-precedence", "cleanup125-precedence", "caller-after-exit0", "caller-after-exit125",
+)
+# Budgets cover each whole logical case, not individual assertions: original
+# operation guard + its existing 3s cleanup allowance + 1s fixture setup
+# + the original 2s unrelated-sentinel teardown guard.
+# Ownership additionally allows 2s readiness, 2s unrelated wait and 2s probe teardown.
+# Each dispatcher run_owned adds its existing 3s allowance; suite setup adds 1s.
+CLEANUP_ALLOWANCE = 3
+SETUP_ALLOWANCE = 1
+CASES = (
+    ("unrelated-adoption", 14, probe_case, "ownership"),
+    ("dynamic-unrelated-adoption", 14, probe_case, "dynamic"),
+    ("real-pi-poison-isolation", 14, probe_case, "real-pi"),
+    ("environment-caller-cwd", 8, environment_case, None),
+    ("explicit-wrapper", 8, wrapper_case, None),
+    ("nested-explicit-wrapper", 8, wrapper_case, False),
+    ("nested-discovery-wrapper", 8, wrapper_case, True),
+    ("tree-success", 8, tree_case, "success"),
+    ("tree-exit7", 8, tree_case, "exit7"),
+    ("tree-failure", 8, tree_case, "failure"),
+    ("tree-eof", 8, tree_case, "eof"),
+    ("tree-hang", 7, tree_case, "hang"),
+    ("missing-command", 7, missing_case, None),
+    ("private-root-poison-unchanged", 3, removal_case, None),
+    ("outer-TERM", 12, outer_signal_case, "TERM"),
+    ("outer-INT", 12, outer_signal_case, "INT"),
+    ("outer-HUP", 12, outer_signal_case, "HUP"),
+    ("safety-thread", 11, safety_case, ("thread", "caller", signal.SIGTERM)),
+    ("safety-termfork", 11, safety_case, ("termfork", "caller", signal.SIGTERM)),
+    ("late-caller-TERM", 11, safety_case, ("late", "caller", signal.SIGTERM)),
+    ("late-caller-INT", 11, safety_case, ("late", "caller", signal.SIGINT)),
+    ("late-caller-HUP", 11, safety_case, ("late", "caller", signal.SIGHUP)),
+    ("late-supervisor-TERM", 11, safety_case, ("late", "supervisor", signal.SIGTERM)),
+    ("late-supervisor-INT", 11, safety_case, ("late", "supervisor", signal.SIGINT)),
+    ("late-supervisor-HUP", 11, safety_case, ("late", "supervisor", signal.SIGHUP)),
+    ("exit125-precedence", 11, safety_case, ("exit125", "caller", signal.SIGTERM)),
+    ("cleanup125-precedence", 11, safety_case, ("cleanup125", "caller", signal.SIGTERM)),
+    ("caller-after-exit0", 9, caller_exit_case, 0),
+    ("caller-after-exit125", 9, caller_exit_case, 125),
+)
+
+
+def validate_registry(cases=None):
+    cases = CASES if cases is None else cases
+    names = [case[0] for case in cases]
+    if len(names) != len(set(names)):
+        raise ValueError("duplicate scenario registration")
+    if set(names) != set(ORIGINAL_NAMES):
+        raise ValueError(f"original inventory mismatch: missing={sorted(set(ORIGINAL_NAMES) - set(names))}; "
+                         f"unknown={sorted(set(names) - set(ORIGINAL_NAMES))}")
+    if any(not math.isfinite(case[1]) or case[1] <= 0 or not callable(case[2]) for case in cases):
+        raise ValueError("invalid scenario handler/budget")
+    return {case[0]: case for case in cases}
+
+
+def select_cases(names=None):
+    registry = validate_registry()
+    if names is None:
+        names = ORIGINAL_NAMES
+    if not names or len(names) != len(set(names)):
+        raise ValueError("empty or duplicate scenario selection")
+    unknown = set(names) - set(registry)
+    if unknown:
+        raise ValueError(f"unknown scenarios: {sorted(unknown)}")
+    return tuple(registry[name] for name in names)
+
+
+def total_budget(selected):
+    return math.ceil(sum(case[1] + CLEANUP_ALLOWANCE for case in selected) + SETUP_ALLOWANCE)
+
+
+def case_command(runner, name, envelope):
+    return [sys.executable, str(Path(__file__).resolve()), runner.__file__,
+            "--case-oracle", name, str(envelope)]
+
+
+def run_case(runner, name, envelope):
+    case = select_cases([name])[0]
+    pid, identity = os.getpid(), runner.process_info(os.getpid())[0]
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="case-", dir=envelope) as directory:
+        root = Path(directory)
+        fake_pi = root / "fake-pi"
+        fake_pi.write_text(f"#!{sys.executable}\n" + "import json,os,sys\nfrom pathlib import Path\n" +
+            "Path(sys.argv[-1]).write_text(json.dumps({'argv':sys.argv[1:-1], 'cwd':os.getcwd(), 'env':dict(os.environ)}))\n")
+        fake_pi.chmod(0o700)
+        poison = root / "personal"
+        poison.mkdir()
+        (poison / "settings.json").write_text('{"packages":["must-not-load"]}')
+        original = (poison / "settings.json").read_bytes()
+        source = {**os.environ, "PI_BIN": str(fake_pi), "PI_CODING_AGENT_DIR": str(poison),
+                  "PI_SESSION_FILE": "personal-checkpoint", "OPENAI_API_KEY": "must-not-leak",
+                  "AWS_PROFILE": "must-not-leak", "NODE_OPTIONS": "must-not-load"}
+        sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        sentinel_identity = runner.process_info(sentinel.pid)[0]
+        try:
+            with runner.isolated_environment(source) as env:
+                private = Path(env["PI_CODING_AGENT_DIR"]).parent
+                case[2](runner, root, env, private, case[3], source)
+                assert sentinel.poll() is None and runner.process_info(sentinel.pid)[0] == sentinel_identity, "cleanup touched unrelated sentinel"
+            assert not private.exists(), "private directories survived BEFORE backup"
+            assert (poison / "settings.json").read_bytes() == original
+        finally:
+            sentinel.terminate()
+            sentinel.wait(timeout=2)
+    assert not root.exists(), "case fixture survived BEFORE backup"
+    # Receipt is emitted only after original assertions and fixture teardown;
+    # the dispatcher also requires successful exit and supervisor cleanup.
+    (Path(envelope) / "receipt.json").write_text(json.dumps({
+        "name": name, "pid": pid, "identity": identity, "fixture": str(root),
+        "fixtureCleanup": True, "runtimeSeconds": round(time.monotonic() - started, 3)}))
+
+
+def execute_case(runner, case):
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="pi-self-case-") as directory:
+        envelope = Path(directory)
+        # Children create even auxiliary probe fixtures under the private scope.
+        env = {**os.environ, "TMPDIR": directory}
+        try:
+            status = runner.run_owned(case_command(runner, case[0], envelope),
+                                     cwd=Path.cwd(), env=env, timeout=case[1])
+            receipt = envelope / "receipt.json"
+            record = json.loads(receipt.read_text()) if receipt.exists() else {"name": case[0], "fixtureCleanup": False}
+        except (OSError, RuntimeError, ValueError) as error:
+            print(f"FAIL {case[0]}: supervision/receipt error: {error}", file=sys.stderr, flush=True)
+            status, record = 125, {"name": case[0], "fixtureCleanup": False}
+        if status == 0:
+            info = runner.process_info(record.get("pid", os.getpid()))
+            valid = (record.get("name") == case[0] and record.get("fixtureCleanup") is True
+                     and "fixture" in record and not Path(record["fixture"]).exists()
+                     and not (info and info[0] == record.get("identity")))
+            if not valid:
+                status = 125
+        record.update(status=status, supervisorRuntimeSeconds=round(time.monotonic() - started, 3))
+    print("CASE_RESULT " + json.dumps(record, sort_keys=True), flush=True)
+    return record
+
+
+def check_results(selected, records, *, full):
+    expected = [case[0] for case in selected]
+    actual = [record["name"] for record in records if record is not None]
+    if actual != expected or len(actual) != len(set(actual)):
+        raise ValueError(f"incomplete execution ledger: expected={expected}, actual={actual}")
+    if full and (len(actual) != 29 or set(actual) != set(ORIGINAL_NAMES)):
+        raise ValueError("full PASS requires all 29 original scenarios exactly once")
+    if any(record["status"] != 0 for record in records):
+        raise ValueError("nonzero scenario execution in ledger")
+    if (any(record.get("fixtureCleanup") is not True for record in records)
+            or len({record.get("fixture") for record in records}) != len(records)
+            or len({(record.get("pid"), record.get("identity")) for record in records}) != len(records)):
+        raise ValueError("missing cleanup evidence or reused fixture/process identity")
+
+
+def self_test(runner, names=None):
+    selected = select_cases(names)
+    records = []
+    started = time.monotonic()
+    for index, case in enumerate(selected):
+        record = execute_case(runner, case)
+        records.append(record)
+        if record is None or record["status"] != 0:
+            print(f"FAIL {case[0]}: status={record['status'] if record else 'missing receipt'}; "
+                  f"remaining not run={[item[0] for item in selected[index+1:]]}", file=sys.stderr, flush=True)
+            return record["status"] if record else 125
+    try:
+        check_results(selected, records, full=names is None)
+    except ValueError as error:
+        print(f"FAIL self-test: {error}", file=sys.stderr, flush=True)
+        return 125
+    label = "29/29 original scenarios passed" if names is None else f"{len(records)} selected scenarios passed (not full-suite PASS)"
+    print(f"isolated-check self-test: {label} in {time.monotonic() - started:.2f}s", flush=True)
+    return 0
 
 
 if __name__ == "__main__":
@@ -591,8 +747,7 @@ if __name__ == "__main__":
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
     if sys.argv[2:] == ["--capture-only"]:
-        # Own these extra fixtures separately so the original 27-check group
-        # retains its existing 15s guard and no failing oracle leaks a child.
+        # Separate bounded backup scope; recovery callers retain this contract.
         sys.exit(runner.run_owned([sys.executable, str(Path(__file__).resolve()),
                                   str(Path(runner.__file__).resolve()), "--capture-oracle"],
                                  cwd=Path.cwd(), env=dict(os.environ), timeout=7))
@@ -604,5 +759,7 @@ if __name__ == "__main__":
                                  cwd=Path.cwd(), env=dict(os.environ), timeout=6))
     elif sys.argv[2:] == ["--active-oracle"]:
         active_reaping_probe(runner)
+    elif len(sys.argv) == 5 and sys.argv[2] == "--case-oracle":
+        run_case(runner, sys.argv[3], sys.argv[4])
     else:
-        self_test(runner)
+        sys.exit(self_test(runner, sys.argv[3:] if sys.argv[2:3] == ["--selected"] else None))

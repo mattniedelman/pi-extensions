@@ -67,6 +67,12 @@ class RegistrationTests(unittest.TestCase):
                  ("lifecycle.py", "lifecycle_controls.py", "lifecycle-probe.ts", "lifecycle-replay-probe.ts")}
         self.assertTrue(paths <= checker.REQUIRED, "lifecycle adapter missing from artifact contract")
 
+    def test_self_test_controls_are_required_in_artifact(self):
+        spec = importlib.util.spec_from_file_location("self_test_artifact_contract", CHECKER)
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        self.assertIn("packages/rlm-kernel/self_test_controls.py", checker.REQUIRED)
+
     def test_actual_seven_program_manifest(self):
         self.assertEqual(len(SCRIPT.split(" && ")), 7)
         self.assertEqual(metadata_for(SCRIPT), "4 extension entries; 3 host peers; 4 kernel test programs")
