@@ -160,16 +160,17 @@ bytes back to `kernel.bin` or expect a different Monty version to repair them.
 
 Resume/reload and new-session behavior have runtime evidence; tree/fork/clone
 semantics follow pi's documented session lifecycle and the current identity
-implementation. Dedicated broader lifecycle verification remains a separate gate.
+implementation. The broader installed lifecycle verification is recorded below.
 
 ## Installation
 
 The selected durable source is an ordinary, independent git clone at
 `~/.local/share/pi-extensions/rlm-kernel-v1`, checked out at a reviewed commit.
 Preparing this source does not install it into personal settings. The initial
-runtime preparation is pinned to reviewed `d61eb4fad3bc4f8579b85467c0ba7abca1085a69`;
-after the remaining lifecycle/live/RSS gates, repin the clean clone to the final
-reviewed production HEAD. Do not describe the initial pin as completed v1.
+runtime preparation used reviewed `d61eb4fad3bc4f8579b85467c0ba7abca1085a69`.
+The final verification passed as recorded below; the durable clone must be pinned
+to the final reviewed production commit, not that initial preparation commit.
+Confirm its actual pin with `git -C <durable-clone> rev-parse HEAD`.
 No publication is needed. When preparing it intentionally, substitute the
 reviewed full commit ID and an existing local repository path:
 
@@ -515,8 +516,39 @@ inside the 180s outer guard. Offline worker is capped at 36s, with 12s phase
 limits inside 45s. Reports allow only fixed outcomes, source commit/mode, sanitized
 numeric usage/cost estimates and explicit accepted risks; raw state, model
 headers, provider stderr and transcripts are never printed. Small-fixture
-compaction is not a claim of context savings or performance. Actual live proof,
-measured live RSS and final reviewed clone repin are still pending.
+compaction is not a claim of context savings or performance.
+
+### Recorded v1 verification (2026-10-23)
+
+Exactly one authorized provider-backed lifecycle run passed at
+`b4dc8fe6d856287a44469b819a57194202b9cc91`, using
+`litellm/us.openai.gpt-6.1-sol`. All six phases passed with six Python prompts,
+twelve assistant responses, one nested read and one actual-provider compaction.
+Elapsed time was 26.10s; peak RSS was 293984 KiB (287.1 MiB). Owned survivors
+were zero before resume and backup. Selected-only private auth/model copies
+were removed, the source auth was byte-equal, and personal settings were unchanged.
+This authorization is consumed; do not repeat the paid run without new approval.
+
+The subsequent runner-only refactor was independently spec- and quality-reviewed
+at `984ce7f543352be746641662b05a230743240f85`. The runtime, manifest and live
+harness were unchanged, so both reviews found the saved live proof applicable.
+The quality reviewer independently ran all 29 named scenarios (17.99s,
+149372 KiB peak RSS), eight dispatcher controls, six capture checks, one active
+reaping check, fifteen packaging controls and five artifact boundary checks.
+The isolated default npm suite passed in 39.72s with 174948 KiB (170.8 MiB)
+peak RSS and 299 observed owned identities, zero survivors. These are measured
+small-fixture results, not performance guarantees. Syntax and diff checks passed;
+there is no configured linter, build or TypeScript typecheck to claim.
+
+The original monolithic runner failure (15.523s, exit124) remains recorded.
+The refactor replaced an aggregate verification-budget mismatch, not a demonstrated
+kernel cleanup defect; original operation guards and signal/ownership assertions
+were preserved. Historical permission-sensor failures also remain unresolved under
+the accepted 576/IUA disposition above. Durable-clone repinning and its no-model
+installed-readiness result are recorded in the local `pi-extensions-4px` and
+`pi-extensions-ios.1` completion records; verify the clone's clean pin rather than
+assuming this document identifies a checkout. Personal installation migration and
+publication remain separately gated.
 
 ## Opt-in live permission check
 
