@@ -195,6 +195,66 @@ def stop(proc, rpc, owned):
     require(not owned.remaining())
 
 
+def direct_read_control(env, cwd, argv, selector, log):
+    """Actual agent-loop direct read: hook denial must precede builtin file IO."""
+    with tempfile.TemporaryFile() as stderr, p.ReadSensor([cwd / "large.txt"]) as sensor:
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=stderr, start_new_session=True)
+        owned = p.isolation.OwnedProcesses(proc)
+        rpc = LifecycleRpc(proc, owned)
+        try:
+            phases = {"startup": sensor.counts()}
+            rpc.request("state", "get_state")
+            before = len(hooks(log))
+            phases["beforePrompt"] = sensor.counts()
+            require(rpc.request("negative", "prompt", message="LIFECYCLE seed\nDirect-read guard control").get("disposition") == "started")
+            deadline = time.monotonic() + 12
+            while not any(e.get("type") == "agent_settled" for e in rpc.events):
+                rpc.pump(deadline)
+            configured(rpc)
+            phases["afterSettled"] = sensor.counts()
+            events = list(rpc.events)
+            observed = hooks(log)[before:]
+            stop(proc, rpc, owned)
+            phases["finalShutdown"] = sensor.counts()
+            calls = [e for e in observed if e.get("type") == "call"]
+            results = [e for e in observed if e.get("type") == "result"]
+            ends = [e for e in events if e.get("type") == "tool_execution_end"]
+            assistants = [e["message"] for e in events if e.get("type") == "message_end"
+                          and e.get("message", {}).get("role") == "assistant"]
+            assert_usage(assistants, selector, replay=True)
+            call_id = calls[0].get("id") if len(calls) == 1 else None
+            checks = {
+                "directHookBlocked": len(calls) == 1 and calls[0].get("toolName") == "read"
+                    and calls[0].get("match") is False,
+                "noPythonParent": not any(e.get("toolName") == "python" for e in observed)
+                    and len(ends) == 1 and ends[0].get("parentToolCallId") is None,
+                "errorResult": len(results) == len(ends) == 1
+                    and results[0] == {"type": "result", "toolName": "read", "id": call_id, "isError": True}
+                    and ends[0].get("toolCallId") == call_id and ends[0].get("isError") is True,
+                "guardReason": len(ends) == 1 and "Unexpected lifecycle" in json.dumps(ends[0].get("result")),
+                "noEndContent": not p.contains_sentinel(events, DOC)
+                    and not p.contains_sentinel(events, "needle one") and not p.contains_sentinel(events, "needle two"),
+                "noBuiltinAccess": all(value == {"large.txt": 0} for value in phases.values()),
+                "settled": [e for e in events if e.get("type") == "agent_settled"] == [{"type": "agent_settled", "aborted": False}],
+                "noSurvivorsBeforeBackup": not owned.remaining(),
+            }
+            print("lifecycle direct-read control: " + json.dumps({
+                "checks": {key: "PASS" if value else "FAIL" for key, value in checks.items()},
+                "sensorPhases": phases, "hookCalls": len(calls), "hookResults": len(results),
+                "hookMatch": calls[0].get("match") if len(calls) == 1 else None,
+                "executionEnds": len(ends), "assistantResponses": len(assistants),
+                "ownedProcesses": len(owned.observed), "survivorsBeforeBackup": len(owned.remaining()),
+                "mode": "offline-local-replay-NOT-inference"}, sort_keys=True), flush=True)
+            require(all(checks.values()))
+        finally:
+            owned.cleanup()
+            rpc.close()
+            if not proc.stdin.closed:
+                proc.stdin.close()
+            proc.stdout.close()
+
+
 def lifecycle_check(env, cwd, installed, selector, *, replay=False):
     provider, model = selector.split("/", 1)
     log = cwd / "lifecycle.jsonl"
@@ -206,6 +266,9 @@ def lifecycle_check(env, cwd, installed, selector, *, replay=False):
         argv.extend(["--extension", str(ROOT / "lifecycle-replay-probe.ts")])
     elif env.get("PI_RLM_COMPAT_EXTENSION"):
         argv.extend(["--extension", env["PI_RLM_COMPAT_EXTENSION"]])
+    if env.get("PI_RLM_LIFECYCLE_NEGATIVE"):
+        require(replay and env["PI_RLM_LIFECYCLE_NEGATIVE"] == "direct-read")
+        return direct_read_control(env, cwd, argv, selector, log)
     assistants = []
     compaction_usage = {}
     session = None
@@ -348,14 +411,17 @@ def worker(selector, *, replay=False):
     print("lifecycle owned source fixtures: absent", flush=True)
 
 
-def run(selector, *, replay=False):
+def run(selector, *, replay=False, negative=None):
     require(selector == REPLAY_SELECTOR if replay else selector.startswith("litellm/") and bool(selector.split("/", 1)[1]))
     # Live-only source lookup/copy. Offline and absent-model paths never enter it.
+    require(negative is None or (replay and negative == "direct-read"))
     source = None if replay else Path(os.environ.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi/agent")))
     with p.isolation.isolated_environment(discover_extensions=True) as env:
         agent = Path(env["PI_CODING_AGENT_DIR"])
         command = [sys.executable, str(ROOT / "e2e.py"), "--_worker", "--model", selector]
         if replay:
+            if negative:
+                env["PI_RLM_LIFECYCLE_NEGATIVE"] = negative
             command.append("--_replay")
             result = p.isolation.run_owned_capture(command, cwd=agent.parent / "cwd", env=env, timeout=36)
         else:

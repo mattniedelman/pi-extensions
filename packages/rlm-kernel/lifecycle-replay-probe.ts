@@ -40,10 +40,10 @@ export default function (pi) {
           };
           await emit({ type: "start", partial: message });
           if (!continuation) {
-            const toolCall = { type: "toolCall", id: "call_" + String(requests).padStart(32, "0"), name: "python", arguments: {} };
+            const toolCall = { type: "toolCall", id: "call_" + String(requests).padStart(32, "0"), name: process.env.PI_RLM_LIFECYCLE_NEGATIVE === "direct-read" ? "read" : "python", arguments: {} };
             message.content.push(toolCall);
             await emit({ type: "toolcall_start", contentIndex: 0, partial: message });
-            toolCall.arguments = { code: cell };
+            toolCall.arguments = toolCall.name === "read" ? { path: "large.txt" } : { code: cell };
             await emit({ type: "toolcall_delta", contentIndex: 0, delta: JSON.stringify(toolCall.arguments), partial: message });
             await emit({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
             message.stopReason = "toolUse";

@@ -59,5 +59,11 @@ if __name__ == "__main__":
     oracle_controls()
     skip_control()
     import lifecycle as l
+    # No manually emitted execution/hook events: direct read via actual agent loop.
+    if sys.argv[1:] not in ([], ["--negative", "direct-read"]):
+        raise SystemExit("unsupported lifecycle control argv")
+    status = l.run(l.REPLAY_SELECTOR, replay=True, negative="direct-read")
+    if status or sys.argv[1:]:
+        raise SystemExit(status)
     # Same adapter, actual install/discovery, RPC, Python callback and session APIs.
     raise SystemExit(l.run(l.REPLAY_SELECTOR, replay=True))
