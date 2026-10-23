@@ -497,7 +497,7 @@ class Controls(unittest.TestCase):
             agent.mkdir(mode=0o700); package.mkdir(mode=0o700)
             (package / "package.json").write_text(json.dumps({"name": "pi-provider-litellm", "version": "fixture",
                                                              "pi": {"extensions": ["./src/index.ts"]}}))
-            original = {"packages": [{"source": "/owned/installed", "extensions": ["+packages/rlm-kernel/index.ts"]}],
+            original = {"packages": [{"source": "/owned/installed", "extensions": ["+packages/rlm/index.ts"]}],
                         "retry": {"enabled": False}}
             (agent / "settings.json").write_text(json.dumps(original))
             cache = {"litellm": {"models": [{"provider": "litellm", "id": "fixture-model", "api": "openai-responses",

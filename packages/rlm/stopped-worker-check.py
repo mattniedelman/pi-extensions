@@ -79,7 +79,7 @@ def main(node):
             print(f"UNRELATED sentinel alive: {sentinel.pid}/{identity}", flush=True)
             assert statuses == [0] * len(modes), f"stopped-worker case statuses: {statuses}"
         assert not root.exists(), "private fixture root survived removal"
-        print("rlm-kernel stopped Monty checks passed: 4/4; absence BEFORE backup; unrelated sentinel alive", flush=True)
+        print("rlm stopped Monty checks passed: 4/4; absence BEFORE backup; unrelated sentinel alive", flush=True)
     finally:
         for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(number, signal.SIG_IGN)

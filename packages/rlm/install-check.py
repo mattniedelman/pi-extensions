@@ -35,7 +35,7 @@ def committed_source(env, cwd, source, expected):
     assert command(env, cwd, "git", "-C", source, "rev-parse", "HEAD") == expected
     assert not (source / ".git/objects/info/alternates").exists(), "alternate object dependency"
     assert not command(env, cwd, "git", "-C", source, "status", "--porcelain"), "dirty installed checkout"
-    for relative in ("package.json", *("packages/rlm-kernel/" + name for name in integration.RUNTIME_FILES)):
+    for relative in ("package.json", *("packages/rlm/" + name for name in integration.RUNTIME_FILES)):
         # Compare only source, never user checkpoints. Dirty originals cannot be
         # quietly substituted for their committed counterpart in the fixture.
         committed = command(env, cwd, "git", "-C", source, "rev-parse", f"HEAD:{relative}")
@@ -51,7 +51,7 @@ def source_negatives(env, cwd, installed, sha):
         assert "independent" in str(error), error
     else:
         raise AssertionError("original worktree accepted as installed source")
-    path = installed / "packages/rlm-kernel/index.ts"
+    path = installed / "packages/rlm/index.ts"
     clean = path.read_bytes()
     try:
         path.write_bytes(clean + b"\n// owned dirty-source negative\n")
@@ -153,7 +153,7 @@ def worker():
         listing = command(env, cwd, installer, "list")
         assert (str(installed) in listing or packages[0] in listing) and str(original) not in listing, listing
         configured = json.loads(settings.read_text())
-        configured["packages"] = [{"source": packages[0], "extensions": ["+packages/rlm-kernel/index.ts"],
+        configured["packages"] = [{"source": packages[0], "extensions": ["+packages/rlm/index.ts"],
                                    "skills": [], "prompts": [], "themes": []}]
         settings.write_text(json.dumps(configured))
         before = settings.read_bytes()

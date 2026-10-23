@@ -130,7 +130,7 @@ try {
     await bounded(exit, "real sidecar child exit", 3000);
     assert.throws(() => process.kill(child.pid, 0), { code: "ESRCH" });
   }
-  console.log(`rlm-kernel real client cleanup passed: ${children.length} owned children, 0 survivors`);
+  console.log(`rlm real client cleanup passed: ${children.length} owned children, 0 survivors`);
   const missing = new SidecarClient({ command: join(root, "missing-uv"), args: [], cwd: root });
   try {
     await assert.rejects(missing.request("execute", "1 + 1"), /ENOENT|not running/);
@@ -142,4 +142,4 @@ try {
   await rm(root, { recursive: true, force: true });
 }
 await assert.rejects(stat(root), { code: "ENOENT" });
-console.log("rlm-kernel client checks passed");
+console.log("rlm client checks passed");

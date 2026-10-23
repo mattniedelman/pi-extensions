@@ -8,14 +8,14 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-CHECKER = ROOT / "packages/rlm-kernel/package-check.py"
+CHECKER = ROOT / "packages/rlm/package-check.py"
 PACKAGE = json.loads((ROOT / "package.json").read_text())
 SCRIPT = PACKAGE["scripts"]["test"]
 KERNEL_COMMANDS = (
-    "uv run --project packages/rlm-kernel/python --locked python packages/rlm-kernel/python/check.py",
-    "node packages/rlm-kernel/check.mjs",
-    "node packages/rlm-kernel/bridge-check.mjs",
-    "python3 packages/rlm-kernel/integration.py",
+    "uv run --project packages/rlm/python --locked python packages/rlm/python/check.py",
+    "node packages/rlm/check.mjs",
+    "node packages/rlm/bridge-check.mjs",
+    "python3 packages/rlm/integration.py",
 )
 
 
@@ -54,7 +54,7 @@ class RegistrationTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("package_artifact_contract", CHECKER)
         checker = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(checker)
-        paths = {"packages/rlm-kernel/" + name for name in
+        paths = {"packages/rlm/" + name for name in
                  ("permissions.py", "permissions_tests.py", "permissions_assembly_tests.py", "permissions-probe.mjs",
                   "permissions_replay.py", "permissions-replay-probe.ts")}
         self.assertTrue(paths <= checker.REQUIRED, "permission oracle missing from required artifact contract")
@@ -63,7 +63,7 @@ class RegistrationTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("lifecycle_artifact_contract", CHECKER)
         checker = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(checker)
-        paths = {"packages/rlm-kernel/" + name for name in
+        paths = {"packages/rlm/" + name for name in
                  ("lifecycle.py", "lifecycle_controls.py", "lifecycle-probe.ts", "lifecycle-replay-probe.ts")}
         self.assertTrue(paths <= checker.REQUIRED, "lifecycle adapter missing from artifact contract")
 
@@ -71,7 +71,19 @@ class RegistrationTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("self_test_artifact_contract", CHECKER)
         checker = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(checker)
-        self.assertIn("packages/rlm-kernel/self_test_controls.py", checker.REQUIRED)
+        self.assertIn("packages/rlm/self_test_controls.py", checker.REQUIRED)
+
+    def test_rlm_package_name_and_sidecar_lock(self):
+        self.assertTrue((ROOT / "packages/rlm/index.ts").is_file())
+        self.assertFalse((ROOT / "packages/rlm-kernel/index.ts").exists())
+        self.assertNotIn("packages/rlm-kernel/", SCRIPT)
+        project = (ROOT / "packages/rlm/python/pyproject.toml").read_text()
+        lock = (ROOT / "packages/rlm/python/uv.lock").read_text()
+        self.assertIn('name = "pi-rlm-sidecar"', project)
+        self.assertIn('name = "pi-rlm-sidecar"', lock)
+        self.assertNotIn('name = "pi-rlm-kernel-sidecar"', project + lock)
+        self.assertIn('dependencies = ["pydantic-monty==1.1.0"]', project)
+        self.assertEqual(metadata_for(SCRIPT), "4 extension entries; 3 host peers; 4 kernel test programs")
 
     def test_actual_seven_program_manifest(self):
         self.assertEqual(len(SCRIPT.split(" && ")), 7)

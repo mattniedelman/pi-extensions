@@ -210,7 +210,7 @@ def worker():
         assert len(packages) == 1 and isinstance(packages[0], str), "actual installer declaration missing"
         assert (settings.parent / packages[0]).resolve() == installed, "wrong installed package"
         command(installer, "list")
-        configured["packages"] = [{"source": packages[0], "extensions": ["+packages/rlm-kernel/index.ts"],
+        configured["packages"] = [{"source": packages[0], "extensions": ["+packages/rlm/index.ts"],
                                    "skills": [], "prompts": [], "themes": []}]
         settings.write_text(json.dumps(configured))
         settings.chmod(0o600)

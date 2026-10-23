@@ -1,9 +1,15 @@
-# rlm-kernel
+# rlm
 
 A pi extension exposing one model-only `python` tool backed by a persistent,
 sandboxed Python-subset Monty session in a Python sidecar. It is part of the
-[root pi package](../../README.md). The [v1 decision record](../../changes/ios.1-rlm-kernel-v1/decisions/001-preserve-the-pi-owned-monty-runtime.md)
-explains the ownership and compatibility boundaries.
+[root pi package](../../README.md). Ownership and compatibility boundaries are
+documented below.
+
+The source directory is `packages/rlm` (formerly `packages/rlm-kernel`); the
+sidecar project is named `pi-rlm-sidecar`. This is a naming-only change: the
+`python` tool, session identity and checkpoint locations/formats are unchanged.
+The existing verified durable checkout keeps its historical directory name and
+pin until a separately authorized update; no personal installation is migrated.
 
 ## Support and bootstrap
 
@@ -15,8 +21,8 @@ systems is promised. This extension uses pi 1.1.0's `model-only` exposure,
 `ctx.tools`, `ctx.executeTool` and session lifecycle APIs.
 
 `uv` must be on `PATH`. At `session_start` (not first tool use), the extension
-spawns `uv run --project <package>/packages/rlm-kernel/python --locked python
-<package>/packages/rlm-kernel/python/sidecar.py`. uv creates/synchronizes the shared
+spawns `uv run --project <package>/packages/rlm/python --locked python
+<package>/packages/rlm/python/sidecar.py`. uv creates/synchronizes the shared
 `<state-root>/.venv` using [pyproject.toml](python/pyproject.toml) and
 [uv.lock](python/uv.lock). Monty, its client and runtime are pinned to 1.1.0;
 typing-extensions is locked to 4.16.0. `--locked` checks the dependency lock; it
@@ -258,14 +264,14 @@ explicit deletion decision.
 Focused verification commands from the repository root:
 
 ```bash
-HINDSIGHT_DISABLED=true timeout 60s python3 packages/rlm-kernel/install-check.py
-HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm-kernel/integration.py --case installed
-HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm-kernel/integration.py --case installed --installed-root /absolute/path/to/independent/pi-extensions
-timeout 20s python3 -B packages/rlm-kernel/python/recovery_budget_tests.py
-PYTHONDONTWRITEBYTECODE=1 timeout 90s uv run --project packages/rlm-kernel/python --locked python packages/rlm-kernel/python/check.py
-timeout 90s python3 packages/rlm-kernel/isolated-check.py --timeout 85 -- uv run --project packages/rlm-kernel/python --locked python packages/rlm-kernel/python/check.py
-timeout 30s node packages/rlm-kernel/check.mjs
-timeout 15s node packages/rlm-kernel/bridge-check.mjs
+HINDSIGHT_DISABLED=true timeout 60s python3 packages/rlm/install-check.py
+HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm/integration.py --case installed
+HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm/integration.py --case installed --installed-root /absolute/path/to/independent/pi-extensions
+timeout 20s python3 -B packages/rlm/python/recovery_budget_tests.py
+PYTHONDONTWRITEBYTECODE=1 timeout 90s uv run --project packages/rlm/python --locked python packages/rlm/python/check.py
+timeout 90s python3 packages/rlm/isolated-check.py --timeout 85 -- uv run --project packages/rlm/python --locked python packages/rlm/python/check.py
+timeout 30s node packages/rlm/check.mjs
+timeout 15s node packages/rlm/bridge-check.mjs
 ```
 
 `install-check.py` is an explicit distribution check, not an added default npm
@@ -286,7 +292,7 @@ real checkpoints or actual worktree rename is involved. A retained clone/state
 is not an uninstall failure; explicit cleanup is a separate destructive choice.
 
 For standalone packaging evidence, run `timeout 40s python3
-packages/rlm-kernel/package-check.py`: its artifact step invokes actual `npm pack
+packages/rlm/package-check.py`: its artifact step invokes actual `npm pack
 --dry-run --json --ignore-scripts` with private npm config/cache and asserts
 required sidecar/project/lock/probe/check files, no generated venv/cache/state,
 unbundled host peers, and the unchanged strict default-test argv contract.
@@ -342,16 +348,16 @@ Run from the repository root, offline with the existing cached dependencies:
 
 ```bash
 export PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true
-budget=$(python3 packages/rlm-kernel/isolated-check.py --self-test-budget)
-timeout "$((budget + 3))s" python3 packages/rlm-kernel/isolated-check.py --self-test
+budget=$(python3 packages/rlm/isolated-check.py --self-test-budget)
+timeout "$((budget + 3))s" python3 packages/rlm/isolated-check.py --self-test
 name=tree-exit7
-budget=$(python3 packages/rlm-kernel/isolated-check.py --self-test-budget --case "$name")
-timeout "$((budget + 3))s" python3 packages/rlm-kernel/isolated-check.py --case "$name"
-timeout 20s python3 packages/rlm-kernel/self_test_controls.py
+budget=$(python3 packages/rlm/isolated-check.py --self-test-budget --case "$name")
+timeout "$((budget + 3))s" python3 packages/rlm/isolated-check.py --case "$name"
+timeout 20s python3 packages/rlm/self_test_controls.py
 # Validate 29 actual CASE_RESULT records in a saved full self-test log:
-timeout 20s python3 packages/rlm-kernel/self_test_controls.py --verify-log /path/to/self-test.log
-timeout 10s python3 packages/rlm-kernel/isolated_check_tests.py packages/rlm-kernel/isolated-check.py --capture-only
-timeout 10s python3 packages/rlm-kernel/isolated_check_tests.py packages/rlm-kernel/isolated-check.py --active-only
+timeout 20s python3 packages/rlm/self_test_controls.py --verify-log /path/to/self-test.log
+timeout 10s python3 packages/rlm/isolated_check_tests.py packages/rlm/isolated-check.py --capture-only
+timeout 10s python3 packages/rlm/isolated_check_tests.py packages/rlm/isolated-check.py --active-only
 ```
 
 Case budgets cover the existing operation guard, 3s supervision cleanup, 1s
@@ -382,13 +388,13 @@ completion gate.
 From the repository root:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm-kernel/permissions_replay.py
+PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm/permissions_replay.py
 ```
 
 A focused stream-only regression is also available:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true timeout 20s python3 packages/rlm-kernel/permissions_replay.py --stream-test
+PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true timeout 20s python3 packages/rlm/permissions_replay.py --stream-test
 ```
 
 Both commands first run 13 offline stream-contract checks through an isolated
@@ -453,11 +459,11 @@ required; `4px` and `ios.1` are not complete from offline infrastructure alone.
 From the repository root, without credential access or inference:
 
 ```bash
-PI_RLM_TEST_MODEL= HINDSIGHT_DISABLED=true timeout 10s python3 packages/rlm-kernel/e2e.py
-PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm-kernel/lifecycle_controls.py
+PI_RLM_TEST_MODEL= HINDSIGHT_DISABLED=true timeout 10s python3 packages/rlm/e2e.py
+PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm/lifecycle_controls.py
 # Focus only the actual-host direct-read negative:
-PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm-kernel/lifecycle_controls.py --negative direct-read
-/usr/bin/time -f 'V1_SUITE elapsed=%e max_rss_kb=%M exit=%x' env HINDSIGHT_DISABLED=true timeout 180s python3 packages/rlm-kernel/isolated-check.py --timeout 120 -- npm test
+PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true timeout 45s python3 packages/rlm/lifecycle_controls.py --negative direct-read
+/usr/bin/time -f 'V1_SUITE elapsed=%e max_rss_kb=%M exit=%x' env HINDSIGHT_DISABLED=true timeout 180s python3 packages/rlm/isolated-check.py --timeout 120 -- npm test
 ```
 
 The default `e2e.py` case is `lifecycle` (`resume` remains an alias); absent model
@@ -504,7 +510,7 @@ After review, and ONLY with explicit authorization for the exact live command
 and selected source model/auth access:
 
 ```bash
-/usr/bin/time -f 'V1_LIVE elapsed=%e max_rss_kb=%M exit=%x' env PI_RLM_TEST_MODEL=litellm/us.openai.gpt-6.1-sol HINDSIGHT_DISABLED=true timeout 180s python3 packages/rlm-kernel/e2e.py
+/usr/bin/time -f 'V1_LIVE elapsed=%e max_rss_kb=%M exit=%x' env PI_RLM_TEST_MODEL=litellm/us.openai.gpt-6.1-sol HINDSIGHT_DISABLED=true timeout 180s python3 packages/rlm/e2e.py
 ```
 
 Live reuses the normal configured LiteLLM provider and selected-only private auth
@@ -555,7 +561,7 @@ publication remain separately gated.
 The credential-free assembly regression is a separate narrow command:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 timeout 30s python3 packages/rlm-kernel/permissions_assembly_tests.py
+PYTHONDONTWRITEBYTECODE=1 timeout 30s python3 packages/rlm/permissions_assembly_tests.py
 ```
 
 This is synthetic guard proof, NOT actual pi live-policy proof. It runs actual
@@ -582,9 +588,9 @@ accepted the risk on 2026-10-23; it no longer blocks lifecycle/RSS or repin.
 The maintained permission oracle is explicit and paid, not part of `npm test`:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 timeout 20s python3 packages/rlm-kernel/permissions_tests.py
-HINDSIGHT_DISABLED=true timeout 90s python3 packages/rlm-kernel/e2e.py --case permissions
-PI_RLM_TEST_MODEL=litellm/us.openai.gpt-6.1-sol HINDSIGHT_DISABLED=true timeout 90s python3 packages/rlm-kernel/e2e.py --case permissions
+PYTHONDONTWRITEBYTECODE=1 timeout 20s python3 packages/rlm/permissions_tests.py
+HINDSIGHT_DISABLED=true timeout 90s python3 packages/rlm/e2e.py --case permissions
+PI_RLM_TEST_MODEL=litellm/us.openai.gpt-6.1-sol HINDSIGHT_DISABLED=true timeout 90s python3 packages/rlm/e2e.py --case permissions
 ```
 
 Without `PI_RLM_TEST_MODEL`, the command clearly reports SKIP. The live command

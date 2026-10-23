@@ -524,7 +524,7 @@ def live_check(env, cwd, installed, selector, *, replay=False):
                     argv_bytes = Path(f"/proc/{pid}/cmdline").read_bytes()
                 except FileNotFoundError:
                     continue
-                if str(installed / "packages/rlm-kernel/python/sidecar.py").encode() in argv_bytes:
+                if str(installed / "packages/rlm/python/sidecar.py").encode() in argv_bytes:
                     sidecars.append(pid)
             guards["installed_sidecar"] = bool(sidecars)
             proc.stdin.close()
@@ -603,7 +603,7 @@ def worker(selector):
         assert len(packages) == 1 and isinstance(packages[0], str), "actual installer declaration missing"
         assert (settings.parent / packages[0]).resolve() == installed, "wrong installed package"
         command(installer, "list")
-        configured["packages"] = [{"source": packages[0], "extensions": ["+packages/rlm-kernel/index.ts"], "skills": [], "prompts": [], "themes": []}]
+        configured["packages"] = [{"source": packages[0], "extensions": ["+packages/rlm/index.ts"], "skills": [], "prompts": [], "themes": []}]
         settings.write_text(json.dumps(configured))
         settings.chmod(0o600)
         identity = configure_provider(settings.parent, selector, Path(env["PI_RLM_PROVIDER_PACKAGE"]))

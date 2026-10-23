@@ -3,7 +3,7 @@ revision = 5
 requires-python = ">=3.10"
 
 [[package]]
-name = "pi-rlm-kernel-sidecar"
+name = "pi-rlm-sidecar"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

@@ -52,4 +52,4 @@ const manyCtx = { ...ctx, tools: manyTools };
 const manyPi = { getAllTools: () => manyTools };
 const listed = await handleBridgeCall(manyPi, manyCtx, "__bridge_tools__", {}, signal);
 assert.equal(listed.structured.length, 25);
-console.log("rlm-kernel bridge checks passed");
+console.log("rlm bridge checks passed");

@@ -342,7 +342,7 @@ def lifecycle_check(env, cwd, installed, selector, *, replay=False):
                     different = rpc.request("new-state", "get_state").get("sessionFile")
                     require(isinstance(different, str) and different != session)
                     assistants += prompt(rpc, "isolation", None, selector, log, replay=replay, isolated=True)
-                sidecar = str(installed / "packages/rlm-kernel/python/sidecar.py").encode()
+                sidecar = str(installed / "packages/rlm/python/sidecar.py").encode()
                 require(any(sidecar in Path(f"/proc/{pid}/cmdline").read_bytes() for pid in owned.remaining()))
                 stop(proc, rpc, owned)  # Zero owned identities BEFORE a resumed process can launch.
                 observed_count += len(owned.observed)
@@ -409,7 +409,7 @@ def worker(selector, *, replay=False):
         require(len(packages) == 1 and isinstance(packages[0], str) and (agent / packages[0]).resolve() == installed)
         listing = command(installer, "list")
         require(str(installed) in listing or packages[0] in listing)
-        configured["packages"] = [{"source": packages[0], "extensions": ["+packages/rlm-kernel/index.ts"], "skills": [], "prompts": [], "themes": []}]
+        configured["packages"] = [{"source": packages[0], "extensions": ["+packages/rlm/index.ts"], "skills": [], "prompts": [], "themes": []}]
         settings.write_text(json.dumps(configured))
         if not replay:
             identity = p.configure_provider(agent, selector, Path(env["PI_RLM_PROVIDER_PACKAGE"]))

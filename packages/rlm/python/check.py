@@ -125,7 +125,7 @@ with tempfile.TemporaryDirectory(prefix="pi-rlm-sidecar-") as directory:
     reset_restored = run([{"id": 18, "operation": "execute", "code": "z"}], reset_state)
     assert reset_restored[0]["ok"] is False and "NameError" in reset_restored[0]["error"]
     assert not reset_state.exists()
-    print("rlm-kernel actual-file privacy/quarantine/reset retention checks passed: 3/3")
+    print("rlm actual-file privacy/quarantine/reset retention checks passed: 3/3")
 
     long_error = run([{"id": 16, "operation": "execute", "code": "raise Exception('a' * 100000)"}], base / "error.bin")
     assert long_error[0]["ok"] is False
@@ -133,4 +133,4 @@ with tempfile.TemporaryDirectory(prefix="pi-rlm-sidecar-") as directory:
 
 assert not base.exists(), "private sidecar fixture root survived cleanup"
 run_checks()
-print("rlm-kernel sidecar checks passed")
+print("rlm sidecar checks passed")

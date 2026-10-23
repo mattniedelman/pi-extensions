@@ -185,7 +185,7 @@ def independent_source(root):
     root = root.resolve(strict=True)
     original = ROOT.parents[1]
     assert not root.is_relative_to(original), "installed root must be independent of original worktree"
-    for relative in ("package.json", *("packages/rlm-kernel/" + name for name in RUNTIME_FILES)):
+    for relative in ("package.json", *("packages/rlm/" + name for name in RUNTIME_FILES)):
         path = root / relative
         assert path.resolve(strict=True).is_relative_to(root), f"installed source escapes independent root: {relative}"
         assert not path.samefile(original / relative), f"installed source aliases original: {relative}"
@@ -195,7 +195,7 @@ def independent_source(root):
 def installed_check(env, cwd, installed, mode="ready"):
     """Reusable oracle for zog after installation; no install/list/remove here."""
     installed = independent_source(installed)
-    source = installed / "packages/rlm-kernel/index.ts"
+    source = installed / "packages/rlm/index.ts"
     fixture = cwd / ("installed-" + mode)
     fixture.mkdir()
     for name in ("state", "sessions", "bin"):
@@ -278,15 +278,15 @@ def installed_checks(env, cwd, selected):
     with tempfile.TemporaryDirectory(prefix="pi-qwy-source-") as directory:
         installed = Path(selected) if selected else Path(directory) / "independent"
         if not selected:
-            (installed / "packages/rlm-kernel/python").mkdir(parents=True)
+            (installed / "packages/rlm/python").mkdir(parents=True)
             shutil.copy2(ROOT.parents[1] / "package.json", installed / "package.json")
             for name in RUNTIME_FILES:
-                shutil.copy2(ROOT / name, installed / "packages/rlm-kernel" / name)
+                shutil.copy2(ROOT / name, installed / "packages/rlm" / name)
         installed = independent_source(installed)
         # A private configured package, RLM-only filter; not an original index --extension.
         settings = Path(env["PI_CODING_AGENT_DIR"]) / "settings.json"
         settings.write_text(json.dumps({"packages": [{"source": str(installed),
-            "extensions": ["+packages/rlm-kernel/index.ts"], "skills": [], "prompts": [], "themes": []}],
+            "extensions": ["+packages/rlm/index.ts"], "skills": [], "prompts": [], "themes": []}],
             "extensions": ["-builtin:mcp", "-builtin:llama.cpp", "-builtin:codemode", "-builtin:tool-search"]}))
         for mode in ("ready", "missing-uv", "failed-bootstrap"):
             installed_check(env, cwd, installed, mode)
@@ -312,7 +312,7 @@ def worker(case="all", installed_root=None):
         for mode in ("EOF", "TERM", "KILL"):
             pi_check(env, cwd, probe, output, mode)
         installed_checks(env, cwd, installed_root)
-    print("rlm-kernel extension integration check passed", flush=True)
+    print("rlm extension integration check passed", flush=True)
 
 
 if __name__ == "__main__":

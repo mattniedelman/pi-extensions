@@ -99,7 +99,7 @@ def check_timeouts(test):
                                        kind, directory], cwd=ROOT, env=dict(os.environ), timeout=4)
             test.assertEqual(status, 0, kind)
             passed += 1
-    print(f"rlm-kernel stalled-worker timeout checks passed: {passed}/3 (absence BEFORE backup)")
+    print(f"rlm stalled-worker timeout checks passed: {passed}/3 (absence BEFORE backup)")
 
 
 class TimeoutChecks(unittest.TestCase):

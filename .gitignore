@@ -1,4 +1,7 @@
+packages/rlm/python/.venv/
+# Legacy ignored development environment is not moved with tracked sources.
 packages/rlm-kernel/python/.venv/
+/changes/
 **/__pycache__/
 *.pyc
 # Raw dumps, convenience names, write staging and quarantine are sensitive.

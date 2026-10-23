@@ -202,5 +202,5 @@ export async function lifecycleChecks(cwd) {
     }
   }
   assert.deepEqual(failures, [], "bounded lifecycle counterexamples");
-  console.log(`rlm-kernel lifecycle checks passed: ${cases.length}/${cases.length}; ${observed} owned children, 0 survivors BEFORE backup`);
+  console.log(`rlm lifecycle checks passed: ${cases.length}/${cases.length}; ${observed} owned children, 0 survivors BEFORE backup`);
 }

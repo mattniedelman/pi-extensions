@@ -7,7 +7,7 @@ Extensions for [pi](https://github.com/earendil-works/pi).
 | [bedrock-sso](packages/bedrock-sso/) | `bedrock-sso` provider: Claude on Amazon Bedrock with prompt caching that works for Claude 5, and automatic `aws sso login` when the SSO session expires. |
 | [cache-status](packages/cache-status/) | Status line below the editor with prompt-cache hit rate, token counts, and cost. Turns red when a Claude model stops caching. |
 | [beads-reminder](packages/beads-reminder/) | In repos that use bd, keeps the `beads-workflow` start ritual and capture gate in the system prompt every turn. |
-| [rlm-kernel](packages/rlm-kernel/) | Persistent Monty Python-subset kernel with pi-owned nested tools and per-session checkpoints. |
+| [rlm](packages/rlm/) | Persistent Monty Python-subset kernel with pi-owned nested tools and per-session checkpoints. |
 
 ## Install and remove
 
@@ -15,7 +15,10 @@ Use a reviewed, ordinary local clone at a fixed commit, not a disposable develop
 worktree. The selected durable v1 source is
 `~/.local/share/pi-extensions/rlm-kernel-v1`; preparation and isolated installation
 verification are separate rollout steps, not accomplished by this documentation.
-See the [kernel installation guide](packages/rlm-kernel/README.md#installation)
+The extension is now named `rlm` at `packages/rlm`. The existing verified clone
+keeps its historical directory name and commit until an intentional update;
+this source rename does not migrate that clone or personal package settings.
+See the [RLM installation guide](packages/rlm/README.md#installation)
 for commit pinning and removal.
 
 Once that clone is prepared:
@@ -44,19 +47,18 @@ or platform. Earlier/later pi releases and other platforms are not claimed teste
 Host-provided pi packages and `typebox` are unbundled `"*"` peers per pi's package
 contract; that peer range is not an API compatibility guarantee.
 
-Read the [kernel operational contract](packages/rlm-kernel/README.md) before use:
+Read the [kernel operational contract](packages/rlm/README.md) before use:
 bootstrap begins at session start, checkpoint files are private but unencrypted,
-and reset/uninstall do not erase all retained sensitive files. Architectural
-rationale is in the [v1 decision record](changes/ios.1-rlm-kernel-v1/decisions/001-preserve-the-pi-owned-monty-runtime.md).
+and reset/uninstall do not erase all retained sensitive files.
 
 ## Test
 
 From the repository root, with `pi`, Node, Python and `uv` on `PATH`:
 
 ```bash
-timeout 180s python3 packages/rlm-kernel/isolated-check.py --timeout 120 -- npm test
-timeout 60s python3 packages/rlm-kernel/isolated-check.py --timeout 45 -- python3 -B packages/rlm-kernel/package-check.py
-timeout 20s python3 -B packages/rlm-kernel/package_check_tests.py
+timeout 180s python3 packages/rlm/isolated-check.py --timeout 120 -- npm test
+timeout 60s python3 packages/rlm/isolated-check.py --timeout 45 -- python3 -B packages/rlm/package-check.py
+timeout 20s python3 -B packages/rlm/package_check_tests.py
 ```
 
 The Linux isolation runner owns private agent configuration, working directory,

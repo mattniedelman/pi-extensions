@@ -207,7 +207,7 @@ class AssemblyControls(unittest.TestCase):
         cwd = root / (case + (('-' + mutant) if mutant else ''))
         cwd.mkdir(mode=0o700)
         installed = root / 'installed'
-        sidecar = installed / 'packages/rlm-kernel/python/sidecar.py'
+        sidecar = installed / 'packages/rlm/python/sidecar.py'
         if not sidecar.exists():
             sidecar.parent.mkdir(parents=True)
             sidecar.write_text(SIDECAR)

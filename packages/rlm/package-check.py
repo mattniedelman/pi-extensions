@@ -9,10 +9,9 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
-KERNEL = "packages/rlm-kernel/"
-ADR = "changes/ios.1-rlm-kernel-v1/decisions/001-preserve-the-pi-owned-monty-runtime.md"
+KERNEL = "packages/rlm/"
 REQUIRED = {
-    "package.json", "README.md", ADR,
+    "package.json", "README.md",
     *(KERNEL + path for path in (
         "README.md", "index.ts", "client.mjs", "bridge.mjs", "package-check.py",
         "package_check_tests.py",
@@ -33,10 +32,10 @@ TEST_ARGV = tuple(tuple(program.split()) for program in (
     "node packages/bedrock-sso/inject.mjs",
     "node packages/cache-status/stats.mjs",
     "node packages/beads-reminder/detect.mjs",
-    "uv run --project packages/rlm-kernel/python --locked python packages/rlm-kernel/python/check.py",
-    "node packages/rlm-kernel/check.mjs",
-    "node packages/rlm-kernel/bridge-check.mjs",
-    "python3 packages/rlm-kernel/integration.py",
+    "uv run --project packages/rlm/python --locked python packages/rlm/python/check.py",
+    "node packages/rlm/check.mjs",
+    "node packages/rlm/bridge-check.mjs",
+    "python3 packages/rlm/integration.py",
 ))
 
 
@@ -77,11 +76,11 @@ def metadata():
 
 def documentation():
     required_links = {
-        "README.md": {"packages/rlm-kernel/"},
-        KERNEL + "README.md": {"../../README.md", "../../" + ADR},
+        "README.md": {"packages/rlm/"},
+        KERNEL + "README.md": {"../../README.md"},
     }
     count = 0
-    for source in ("README.md", KERNEL + "README.md", ADR):
+    for source in ("README.md", KERNEL + "README.md"):
         # These docs use ordinary inline links. Ignore web links and anchor-only links.
         links = set(re.findall(r"\[[^\]]*\]\(([^)\s]+)\)", (ROOT / source).read_text()))
         assert required_links.get(source, set()) <= links, f"missing documentation links: {source}"

@@ -64,9 +64,9 @@ def run_checks(command=None, *, timeout=20):
         status = runner.run_owned(command, cwd=ROOT, env=dict(os.environ), timeout=budget)
         if status:
             raise subprocess.CalledProcessError(status, command)
-        print(f"rlm-kernel recovery group {name}: {len(methods)} methods passed, "
+        print(f"rlm recovery group {name}: {len(methods)} methods passed, "
               f"{time.monotonic() - started:.3f}s (guard {budget}s)", flush=True)
-    print("rlm-kernel recovery coverage passed: 3/3 groups, 4/4 methods", flush=True)
+    print("rlm recovery coverage passed: 3/3 groups, 4/4 methods", flush=True)
 
 
 def contents(path):
@@ -241,7 +241,7 @@ class RecoveryChecks(unittest.TestCase):
                     kernel.close()
                 restored(state, ["x"], 41)
                 passed += 1
-        print(f"rlm-kernel checkpoint failure/restore cases passed: {passed}/{len(cases)}")
+        print(f"rlm checkpoint failure/restore cases passed: {passed}/{len(cases)}")
 
     def test_success_and_empty_names(self):
         with tempfile.TemporaryDirectory(prefix="pi-rlm-recovery-") as directory:
@@ -273,7 +273,7 @@ class RecoveryChecks(unittest.TestCase):
             finally:
                 kernel.close()
             restored(state, ["x"], 40)
-        print("rlm-kernel successful raw-format/private-mode/empty-name restore checks passed")
+        print("rlm successful raw-format/private-mode/empty-name restore checks passed")
 
 
 if __name__ == "__main__":
@@ -295,8 +295,8 @@ if __name__ == "__main__":
             expected_restores = 28 if "RecoveryChecks.test_success_and_empty_names" in selected else 26
             assert len(RESTORE_TIMINGS) == expected_restores, RESTORE_TIMINGS
             assert len(FAILURE_TIMINGS) == 13, FAILURE_TIMINGS
-            print(f"rlm-kernel fresh-process restores passed: {len(RESTORE_TIMINGS)}/{expected_restores}; "
+            print(f"rlm fresh-process restores passed: {len(RESTORE_TIMINGS)}/{expected_restores}; "
                   f"failure responses passed: {len(FAILURE_TIMINGS)}/13", flush=True)
-            print(f"rlm-kernel recovery child timings: restores total {sum(RESTORE_TIMINGS):.3f}s "
+            print(f"rlm recovery child timings: restores total {sum(RESTORE_TIMINGS):.3f}s "
                   f"max {max(RESTORE_TIMINGS):.3f}s; failures total {sum(FAILURE_TIMINGS):.3f}s "
                   f"max {max(FAILURE_TIMINGS):.3f}s (child guard {CHILD_TIMEOUT}s)", flush=True)

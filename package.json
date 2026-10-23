@@ -21,7 +21,7 @@
     "typebox": "*"
   },
   "scripts": {
-    "test": "node packages/bedrock-sso/inject.mjs && node packages/cache-status/stats.mjs && node packages/beads-reminder/detect.mjs && uv run --project packages/rlm-kernel/python --locked python packages/rlm-kernel/python/check.py && node packages/rlm-kernel/check.mjs && node packages/rlm-kernel/bridge-check.mjs && python3 packages/rlm-kernel/integration.py"
+    "test": "node packages/bedrock-sso/inject.mjs && node packages/cache-status/stats.mjs && node packages/beads-reminder/detect.mjs && uv run --project packages/rlm/python --locked python packages/rlm/python/check.py && node packages/rlm/check.mjs && node packages/rlm/bridge-check.mjs && python3 packages/rlm/integration.py"
   },
   "engines": {
     "node": ">=22"
