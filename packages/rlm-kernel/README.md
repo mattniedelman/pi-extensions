@@ -544,10 +544,10 @@ The original monolithic runner failure (15.523s, exit124) remains recorded.
 The refactor replaced an aggregate verification-budget mismatch, not a demonstrated
 kernel cleanup defect; original operation guards and signal/ownership assertions
 were preserved. Historical permission-sensor failures also remain unresolved under
-the accepted 576/IUA disposition above. Durable-clone repinning and its no-model
-installed-readiness result are recorded in the local `pi-extensions-4px` and
-`pi-extensions-ios.1` completion records; verify the clone's clean pin rather than
-assuming this document identifies a checkout. Personal installation migration and
+the accepted 576/IUA disposition above. After durable-clone repinning and no-model
+installed-readiness verification pass, record their results in the local
+`pi-extensions-4px` and `pi-extensions-ios.1` completion records. Verify the clone's
+clean pin rather than assuming this document identifies a checkout. Personal installation migration and
 publication remain separately gated.
 
 ## Opt-in live permission check
