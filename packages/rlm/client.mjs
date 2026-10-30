@@ -2,6 +2,23 @@ import { spawn } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { createInterface } from "node:readline";
 
+const MAX_FRAME_BYTES = 1024 * 1024;
+const MAX_PAYLOAD_BYTES = 256 * 1024;
+
+function serializedFrame(message) {
+  const frame = JSON.stringify(message);
+  if (Buffer.byteLength(frame) > MAX_FRAME_BYTES) throw new Error(`RLM kernel frame exceeds ${MAX_FRAME_BYTES} bytes`);
+  return `${frame}\n`;
+}
+
+function boundedError(error) {
+  try {
+    const detail = String(error);
+    if (Buffer.byteLength(JSON.stringify(detail)) <= MAX_PAYLOAD_BYTES) return detail;
+  } catch {}
+  return `pi tool error exceeds ${MAX_PAYLOAD_BYTES} bytes`;
+}
+
 function processInfo(pid) {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
@@ -96,6 +113,7 @@ export class SidecarClient {
     this.pending = new Map();
     this.nextId = 1;
     this.queue = Promise.resolve();
+    this.pendingStateLossNotice = undefined;
     this.stopping = false;
     this.start();
   }
@@ -123,7 +141,7 @@ export class SidecarClient {
         termination = (async () => {
           try {
             if (graceful) {
-              child.stdin.write(`${JSON.stringify({ id: this.nextId++, operation: "shutdown" })}\n`);
+              child.stdin.write(serializedFrame({ id: this.nextId++, operation: "shutdown" }));
             } else {
               send("SIGTERM");
             }
@@ -160,12 +178,32 @@ export class SidecarClient {
       for (const request of this.pending.values()) {
         clearTimeout(request.timer);
         request.reject(reason);
+        request.barrierReject(reason);
       }
       this.pending.clear();
     };
     this.fail = fail;
 
+    const writeToolResult = (message, request) => {
+      try {
+        child.stdin.write(serializedFrame(message));
+        request?.armTimeout();
+        return true;
+      } catch (error) {
+        fail(error);
+        stopChild();
+        return false;
+      }
+    };
+
+    let stdoutBytes = 0;
     createInterface({ input: child.stdout }).on("line", (line) => {
+      stdoutBytes = Buffer.byteLength(line);
+      if (stdoutBytes > MAX_FRAME_BYTES) {
+        fail(new Error(`RLM kernel frame exceeds ${MAX_FRAME_BYTES} bytes`));
+        stopChild();
+        return;
+      }
       if (this.child !== child || this.closed) return;
       let message;
       try {
@@ -184,20 +222,19 @@ export class SidecarClient {
       if (message.type === "tool_call") {
         const request = this.pending.get(message.id);
         if (!request?.onToolCall) {
-          child.stdin.write(`${JSON.stringify({ id: message.id, type: "tool_result", call_id: message.call_id, error: "No pi tool context is available" })}\n`);
+          writeToolResult({ id: message.id, type: "tool_result", generation: message.generation, cell_id: message.cell_id, call_id: message.call_id, error: "No pi tool context is available" });
           return;
         }
         clearTimeout(request.timer);
         Promise.resolve(request.onToolCall(message.name, message.args))
           .then((result) => {
             if (this.child !== child || this.pending.get(message.id) !== request) return;
-            child.stdin.write(`${JSON.stringify({ id: message.id, type: "tool_result", call_id: message.call_id, result })}\n`);
-            request.armTimeout();
+            if (Buffer.byteLength(JSON.stringify(result)) > MAX_PAYLOAD_BYTES) throw new Error(`pi tool result exceeds ${MAX_PAYLOAD_BYTES} bytes`);
+            writeToolResult({ id: message.id, type: "tool_result", generation: message.generation, cell_id: message.cell_id, call_id: message.call_id, result }, request);
           })
           .catch((error) => {
             if (this.child !== child || this.pending.get(message.id) !== request) return;
-            child.stdin.write(`${JSON.stringify({ id: message.id, type: "tool_result", call_id: message.call_id, error: String(error) })}\n`);
-            request.armTimeout();
+            writeToolResult({ id: message.id, type: "tool_result", generation: message.generation, cell_id: message.cell_id, call_id: message.call_id, error: boundedError(error) }, request);
           });
         return;
       }
@@ -205,8 +242,17 @@ export class SidecarClient {
       if (!request) return;
       clearTimeout(request.timer);
       this.pending.delete(message.id);
-      if (message.ok) request.resolve(message.result);
-      else request.reject(new Error(message.error));
+      if (message.ok) {
+        if (request.aborted && message.result?.state_lost && message.result.notice) {
+          this.pendingStateLossNotice = message.result.notice;
+        }
+        if (!request.aborted) request.resolve(message.result);
+        request.barrierResolve(message.result);
+      } else {
+        const error = new Error(message.error);
+        if (!request.aborted) request.reject(error);
+        request.barrierReject(error);
+      }
     });
     child.stderr.on("data", (chunk) => {
       this.stderr = (this.stderr + chunk.toString()).slice(-8192);
@@ -218,34 +264,77 @@ export class SidecarClient {
     child.stdin.on("error", childError);
     child.on("error", childError);
     child.on("exit", (code, signal) => {
+      if (this.isReady && !this.stopping) this.options.onUnexpectedExit?.();
       fail(new Error(`RLM kernel exited (${code ?? signal ?? "unknown"})${this.stderr ? `: ${this.stderr}` : ""}`));
       stopChild();
     });
   }
 
   request(operation, code, signal, onToolCall, tools = []) {
-    const run = async () => {
-      if (this.stopping) throw new Error("RLM kernel is shutting down");
-      if (this.closed) {
-        await this.stopChild();
-        if (this.stopping) throw new Error("RLM kernel is shutting down");
-        this.start();
-      }
-      const abort = () => {
-        this.fail(new Error("RLM kernel request aborted"));
+    let callerResolve;
+    let callerReject;
+    const caller = new Promise((resolve, reject) => { callerResolve = resolve; callerReject = reject; });
+    caller.catch(() => undefined);
+    let activeRequest;
+    let runStarted = false;
+    let abortSent = false;
+    const detach = (request) => {
+      if (activeRequest === request) activeRequest = undefined;
+      signal?.removeEventListener("abort", abort);
+    };
+    const abort = () => {
+      const error = new Error("RLM kernel request aborted");
+      callerReject(error);
+      if (activeRequest && !abortSent) {
+        abortSent = true;
+        activeRequest.aborted = true;
+        clearTimeout(activeRequest.timer);
+        try {
+          this.child.stdin.write(serializedFrame({ id: activeRequest.id, operation: "abort" }));
+        } catch (writeError) {
+          this.fail(writeError);
+          this.stopChild();
+        }
+      } else if (runStarted) {
+        this.fail(error);
         this.stopChild();
-      };
-      signal?.addEventListener("abort", abort, { once: true });
+      }
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+
+    const runBarrier = async () => {
+      runStarted = true;
       try {
-        if (signal?.aborted) abort();
+        if (this.stopping) throw new Error("RLM kernel is shutting down");
+        if (this.closed) {
+          await this.stopChild();
+          if (this.stopping) throw new Error("RLM kernel is shutting down");
+          this.start();
+        }
+        if (signal?.aborted) throw new Error("RLM kernel request aborted");
         await this.ready;
         if (this.stopping) throw new Error("RLM kernel is shutting down");
         if (signal?.aborted) throw new Error("RLM kernel request aborted");
+        if (this.pendingStateLossNotice) {
+          const notice = this.pendingStateLossNotice;
+          this.pendingStateLossNotice = undefined;
+          throw new Error(notice);
+        }
         const id = this.nextId++;
-        const response = new Promise((resolve, reject) => {
+        const barrier = new Promise((barrierResolve, barrierReject) => {
           const request = {
-            resolve,
-            reject,
+            id,
+            resolve: (value) => {
+              detach(request);
+              callerResolve(value);
+            },
+            reject: (error) => {
+              detach(request);
+              callerReject(error);
+            },
+            barrierResolve,
+            barrierReject,
+            aborted: false,
             timer: undefined,
             onToolCall,
             armTimeout: () => {
@@ -256,18 +345,23 @@ export class SidecarClient {
               }, this.options.requestTimeoutMs);
             },
           };
+          activeRequest = request;
           request.armTimeout();
           this.pending.set(id, request);
         });
-        this.child.stdin.write(`${JSON.stringify({ id, operation, code, tools })}\n`);
-        return await response;
+        this.child.stdin.write(serializedFrame({ id, operation, code, tools }));
+        await barrier;
+      } catch (error) {
+        detach(activeRequest);
+        callerReject(error);
+        throw error;
       } finally {
-        signal?.removeEventListener("abort", abort);
+        detach(activeRequest);
       }
     };
-    const result = this.queue.then(run, run);
-    this.queue = result.catch(() => undefined);
-    return result;
+    const barrier = this.queue.then(runBarrier, runBarrier);
+    this.queue = barrier.catch(() => undefined);
+    return caller;
   }
 
   close() {

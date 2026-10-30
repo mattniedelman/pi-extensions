@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,6 +5,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SidecarClient } from "./client.mjs";
 import { bounded, lifecycleChecks } from "./lifecycle-check.mjs";
+import "./installed-generation-check.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = await mkdtemp(join(tmpdir(), "pi-rlm-client-"));
@@ -61,10 +61,6 @@ const onToolCall = async (name, args) => {
   return { content: `content:${name}`, structured: { name, args }, is_error: false };
 };
 try {
-  const stopped = spawnSync("python3", [join(here, "stopped-worker-check.py"), process.execPath], {
-    stdio: "inherit", env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
-  });
-  assert.equal(stopped.status, 0, "real stopped-worker teardown regression");
   await lifecycleChecks(root);
   client = new SidecarClient({
     command: "uv",
@@ -86,12 +82,16 @@ try {
   assert.equal((await client.request("execute", "temp", undefined, onToolCall, tools)).result, 9);
   await assert.rejects(client.request("execute", "pi.call('effect', {})\n1 / 0", undefined, onToolCall, tools), /ZeroDivisionError/);
   assert.equal(effects, 1);
-  const alias = await client.request("execute", "saved(path='b.txt')['structured']['args']['path']", undefined, onToolCall, tools);
-  assert.equal(alias.result, "b.txt");
+  await assert.rejects(
+    client.request("execute", "saved(path='b.txt')", undefined, onToolCall, tools),
+    /pi tool context expired/,
+  );
   client.child.kill();
   await bounded(firstExit, "real child killed before restart", 3000);
-  const restoredAlias = await client.request("execute", "saved(path='restored.txt')['structured']['args']['path']", undefined, onToolCall, tools);
-  assert.equal(restoredAlias.result, "restored.txt");
+  await assert.rejects(
+    client.request("execute", "saved(path='restored.txt')", undefined, onToolCall, tools),
+    /NameError/,
+  );
   observeChild();
   const [a, b] = await Promise.all([
     client.request("execute", "x = 1\nx", undefined, onToolCall, tools),
@@ -106,14 +106,14 @@ try {
   nestedRejected.catch(() => undefined);
   await bounded(nestedStarted, "real nested call started", 1000);
   const oldTree = await ownedTree(client.child.pid);
-  assert.ok(oldTree.length >= 3, "observe real UV/Python/Monty before abort");
+  assert.ok(oldTree.length >= 3, "observe real uv/Python/Jupyter before abort");
   nestedController.abort();
   await nestedRejected;
-  assert.equal((await bounded(client.request("execute", "x", undefined, onToolCall, tools), "real lazy restart under supervisor", 4500)).result, 2);
+  assert.equal((await bounded(client.request("execute", "x", undefined, onToolCall, tools), "real retained interrupt barrier", 4500)).result, 2);
   for (const old of oldTree) {
-    assert.notEqual((await identity(old.pid))?.start, old.start, "old identity must be absent before backup");
+    assert.equal((await identity(old.pid))?.start, old.start, "retained interrupt must preserve old identity");
   }
-  console.log(`REAL nested abort/lazy restart: ${oldTree.length} old identities absent BEFORE backup`);
+  console.log(`REAL nested abort/retained kernel: ${oldTree.length} owned identities retained`);
   observeChild();
   await new Promise((resolve) => setTimeout(resolve, 400));
   assert.equal((await client.request("execute", "x", undefined, onToolCall, tools)).result, 2);
@@ -121,8 +121,7 @@ try {
   const interrupted = client.request("execute", "while True:\n    pass", controller.signal, onToolCall, tools);
   setTimeout(() => controller.abort(), 50);
   await assert.rejects(interrupted, /aborted/);
-  const restored = await client.request("execute", "x", undefined, onToolCall, tools);
-  assert.equal(restored.result, 2);
+  assert.equal((await client.request("execute", "x", undefined, onToolCall, tools)).result, 2);
   observeChild();
   await client.close();
   assert.equal(client.stopping, true);

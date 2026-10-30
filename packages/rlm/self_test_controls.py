@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Offline dispatch controls; synthetic callbacks exercise only the test ledger."""
+"""Dispatch-ledger and offline-isolation controls, including wrapper/CLI fixtures."""
 import argparse
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import io
 import importlib.util
 import json
@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -51,6 +52,170 @@ def verify_log(path):
         assert not (info and info[0] == record["identity"]), record
     assert any("29/29 original scenarios passed" in line for line in lines)
     print("actual execution evidence: 29/29 unique cases, process identities and removed private fixtures")
+
+
+class OfflineControls(unittest.TestCase):
+    @contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory(prefix="pi-offline-control-") as directory:
+            root = Path(directory)
+            (root / "bin").mkdir()
+            (root / "cache").mkdir()
+            (root / "personal-agent").mkdir()
+            poison = root / "personal-agent" / "settings.json"
+            poison.write_text('{"packages":["must-not-load"]}')
+            fake_pi = root / "bin" / "fake-pi"
+            fake_pi.write_text(f"#!{sys.executable}\nimport json, os, sys\nfrom pathlib import Path\n"
+                "assert os.environ.get('UV_OFFLINE') == '1', 'wrapper lost offline mode'\n"
+                "Path(sys.argv[-1]).write_text(json.dumps({'argv':sys.argv[1:-1], 'cwd':os.getcwd(), "
+                "'env':{'PI_CODING_AGENT_DIR':os.environ['PI_CODING_AGENT_DIR']}}))\n")
+            fake_pi.chmod(0o700)
+            record = root / "uv.jsonl"
+            fake_uv = root / "bin" / "uv"
+            fake_uv.write_text(f"#!{sys.executable}\nimport json, os, sys\n"
+                f"with open({str(record)!r}, 'a') as out:\n"
+                "    out.write(json.dumps({'mode':os.environ.get('UV_OFFLINE'), 'argv':sys.argv[1:]})+'\\n')\n"
+                "print('simulated cache miss', file=sys.stderr)\n"
+                "sys.exit(7 if os.environ.get('UV_OFFLINE') == '1' else 1)\n")
+            fake_uv.chmod(0o700)
+            source = {"PATH": str(root / "bin") + os.pathsep + os.defpath,
+                      "PI_BIN": str(fake_pi), "UV_CACHE_DIR": str(root / "cache"), "UV_OFFLINE": "1",
+                      "PI_CODING_AGENT_DIR": str(poison.parent), "PI_SESSION_FILE": "must-not-leak",
+                      "OPENAI_API_KEY": "must-not-leak", "AWS_PROFILE": "must-not-leak",
+                      "NODE_OPTIONS": "--require must-not-load", "PYTHONPATH": "must-not-load",
+                      "UV_INDEX_URL": "must-not-leak", "UV_TOKEN": "must-not-leak",
+                      "UV_PROJECT_ENVIRONMENT": "must-not-use", "UV_NO_SYNC": "must-not-use"}
+            yield root, source, record
+            self.assertEqual(poison.read_text(), '{"packages":["must-not-load"]}')
+        self.assertFalse(root.exists())
+
+    def assert_scope(self, env, source, roots):
+        private = Path(env["PI_CODING_AGENT_DIR"]).parent
+        self.assertNotIn(private, roots)
+        roots.append(private)
+        for name in ("agent", "state", "sessions", "cwd", "home", "tmp", "config", "cache"):
+            self.assertEqual((private / name).stat().st_mode & 0o777, 0o700)
+            self.assertFalse(list((private / name).iterdir()))
+        for key, name in (("PI_CODING_AGENT_DIR", "agent"), ("PI_RLM_STATE_DIR", "state"),
+                          ("PI_CODING_AGENT_SESSION_DIR", "sessions"), ("HOME", "home")):
+            self.assertEqual(env[key], str(private / name))
+        self.assertEqual(env["UV_PROJECT_ENVIRONMENT"], str(private / "venv"))
+        self.assertEqual(env["UV_CACHE_DIR"], source["UV_CACHE_DIR"])
+        self.assertEqual(env.get("UV_OFFLINE"), "1")
+        self.assertEqual({key for key in env if key.startswith("UV_")},
+                         {"UV_OFFLINE", "UV_CACHE_DIR", "UV_PROJECT_ENVIRONMENT"})
+        for key in ("PI_SESSION_FILE", "OPENAI_API_KEY", "AWS_PROFILE", "NODE_OPTIONS", "PYTHONPATH"):
+            self.assertNotIn(key, env)
+        self.assertEqual(env["HINDSIGHT_DISABLED"], "true")
+        self.assertEqual(env["PI_OFFLINE"], "1")
+        return private
+
+    def assert_cache_miss(self, result, records):
+        # Check the actual executable's mode/argv before status: a nonzero exit
+        # alone cannot distinguish cache-only failure from lost offline mode.
+        self.assertEqual(records, [{"mode": "1", "argv": ["run", "--locked", "python", "-c", "pass"]}])
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertIn("simulated cache miss", result.stderr)
+        self.assertRegex(result.stderr, r"[1-9][0-9]* owned PIDs observed, 0 survivors")
+
+    def cache_miss(self, env, record):
+        before = record.read_text().splitlines() if record.exists() else []
+        result = runner.run_owned_capture(["uv", "run", "--locked", "python", "-c", "pass"],
+            cwd=Path(env["PI_CODING_AGENT_DIR"]).parent / "cwd", env=env, timeout=2)
+        records = [json.loads(line) for line in record.read_text().splitlines()[len(before):]]
+        return result, records
+
+    def test_offline_top_and_nested_cache_only_private_scopes(self):
+        with self.fixture() as (root, source, record):
+            roots = []
+            with runner.isolated_environment(source) as env:
+                private = self.assert_scope(env, source, roots)
+                self.assert_cache_miss(*self.cache_miss(env, record))
+                # Exercise the existing wrapper helpers, including their private
+                # cwd/agent and explicit versus discovery flag assertions.
+                for discover in (None, False, True):
+                    cases.wrapper_case(runner, root, env, private, discover, source)
+                for discover in (False, True):
+                    with runner.isolated_environment(env, discover_extensions=discover) as nested:
+                        self.assert_scope(nested, source, roots)
+                        self.assert_cache_miss(*self.cache_miss(nested, record))
+                    self.assertFalse(roots[-1].exists())
+            self.assertTrue(all(not private.exists() for private in roots))
+            self.assertEqual(len(record.read_text().splitlines()), 3)
+            print("offline scopes: 3 cache-miss status7 launches, one attempt each; fresh roots/cwd/agent absent, 0 owned survivors", flush=True)
+
+    def test_absent_or_nonaccepted_mode_not_invented(self):
+        with self.fixture() as (_root, source, _record):
+            for mode in (None, "0", "true"):
+                with self.subTest(mode=mode):
+                    source.pop("UV_OFFLINE", None)
+                    if mode is not None:
+                        source["UV_OFFLINE"] = mode
+                    with runner.isolated_environment(source) as env:
+                        private = Path(env["PI_CODING_AGENT_DIR"]).parent
+                        self.assertNotIn("UV_OFFLINE", env)
+                        with runner.isolated_environment(env) as nested:
+                            nested_root = Path(nested["PI_CODING_AGENT_DIR"]).parent
+                            self.assertNotIn("UV_OFFLINE", nested)
+                        self.assertFalse(nested_root.exists())
+                    self.assertFalse(private.exists())
+
+    def test_lost_and_altered_nested_mode_mutants_rejected(self):
+        original = runner.isolated_environment
+        for mode in (None, "0"):
+            @contextmanager
+            def mutant(source, *, mode=mode, **kwargs):
+                with original(source, **kwargs) as env:
+                    if "_PI_ISOLATED_WRAPPER" in source:
+                        env.pop("UV_OFFLINE", None)
+                        if mode is not None:
+                            env["UV_OFFLINE"] = mode
+                    yield env
+            with self.subTest(mode=mode), self.fixture() as (_root, source, record):
+                with patch.object(runner, "isolated_environment", mutant):
+                    with runner.isolated_environment(source) as env:
+                        private = Path(env["PI_CODING_AGENT_DIR"]).parent
+                        self.assertEqual(env.get("UV_OFFLINE"), "1")
+                        with runner.isolated_environment(env) as nested:
+                            nested_root = Path(nested["PI_CODING_AGENT_DIR"]).parent
+                            result, records = self.cache_miss(nested, record)
+                            self.assertEqual(len(records), 1)
+                            self.assertEqual(records[0]["mode"], mode)
+                            self.assertEqual(result.returncode, 1)
+                            self.assertIn("0 survivors", result.stderr)
+                            with self.assertRaises(AssertionError):
+                                self.assert_cache_miss(result, records)
+                        self.assertFalse(nested_root.exists())
+                    self.assertFalse(private.exists())
+                print(f"offline mutant rejected: nested mode={mode!r}, status1, one attempt, roots absent", flush=True)
+
+    def test_actual_cli_nested_cache_miss_status_propagation(self):
+        guard = r'''
+import importlib.util, json, os, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('runner', sys.argv[1])
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+outer = Path(os.environ['PI_CODING_AGENT_DIR']).parent
+with runner.isolated_environment(discover_extensions=True) as env:
+    private = Path(env['PI_CODING_AGENT_DIR']).parent
+    assert private != outer
+    result = runner.run_owned_capture(['uv', 'run', '--locked', 'python', '-c', 'pass'],
+        cwd=private / 'cwd', env=env, timeout=2)
+    sys.stderr.write(result.stderr)
+assert not private.exists(), 'nested private root survived before backup'
+print(json.dumps([str(outer), str(private)]), flush=True)
+sys.exit(result.returncode)
+'''
+        with self.fixture() as (root, source, record):
+            result = runner.run_owned_capture([sys.executable, runner.__file__, "--timeout", "2", "--",
+                sys.executable, "-c", guard, runner.__file__], cwd=root, env=source, timeout=6)
+            self.assert_cache_miss(result, [json.loads(line) for line in record.read_text().splitlines()])
+            roots = json.loads(result.stdout)
+            self.assertEqual(len(set(roots)), 2)
+            self.assertTrue(all(not Path(private).exists() for private in roots))
+            self.assertEqual(result.stderr.count("0 survivors"), 3)
+            print("offline CLI: nested cache-miss status7 propagated; one uv run --locked, no attempt2; roots absent, 0 owned survivors", flush=True)
 
 
 class DispatchControls(unittest.TestCase):

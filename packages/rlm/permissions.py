@@ -246,7 +246,7 @@ class LiveRpc(integration.Rpc):
                 self.protocol_ok = False
                 raise RuntimeError("RPC invalid record")
             if raw["type"] == "response" and (not isinstance(raw.get("id"), str)
-                    or raw["id"] not in ("state", "permissions") or raw["id"] in self.responses):
+                    or raw["id"] not in ("state", "permissions", "abort") or raw["id"] in self.responses):
                 self.protocol_ok = False
                 raise RuntimeError("RPC invalid response")
             self.failure_categories.update(failure_categories(raw))
@@ -375,7 +375,7 @@ def verify(rpc, policy, phases, selector, *, replay=False):
         "denial_reason": "IUA_DENIED" in json.dumps(denied.get("result")),
         "python_status": actual.get("isError") is False,
         "python_result_envelope": isinstance(actual.get("result"), dict) and actual["result"].get("details")
-            == {"result": EXPECTED, "output": "", "truncated": False},
+            == {"result": EXPECTED, "output": "", "stderr": "", "truncated": False},
         "hook_calls": len(calls) == 3,
         "hook_ids": len(calls) == 3 and all(e.get("idMatches") is True for e in calls)
             and [(e.get("toolName"), e.get("toolCallId")) for e in calls] == [("python", parent), ("read", ids[0]), ("read", ids[1])],

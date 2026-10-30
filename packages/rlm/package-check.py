@@ -2,11 +2,11 @@
 """Check package/docs structure, not narrative accuracy or installed readiness."""
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 KERNEL = "packages/rlm/"
@@ -14,13 +14,16 @@ REQUIRED = {
     "package.json", "README.md",
     *(KERNEL + path for path in (
         "README.md", "index.ts", "render.ts", "render-probe.ts", "render-check.py", "client.mjs", "bridge.mjs", "package-check.py",
-        "package_check_tests.py",
+        "package_check_tests.py", "installed-generation.mjs", "installed-generation-check.mjs",
         "python/sidecar.py", "python/pyproject.toml", "python/uv.lock",
-        "python/check.py", "python/recovery_check.py", "python/recovery_timeout_check.py",
+        "python/check.py", "python/bootstrap_tests.py", "python/jupyter_sidecar_tests.py",
+        "python/cancellation_tests.py", "python/operations_tests.py",
         "check.mjs", "bridge-check.mjs", "integration.py", "e2e.py",
         "lifecycle.py", "lifecycle_controls.py", "lifecycle-probe.ts", "lifecycle-replay-probe.ts",
         "permissions.py", "permissions_tests.py", "permissions_assembly_tests.py", "permissions-probe.mjs",
-        "permissions_replay.py", "permissions-replay-probe.ts",
+        "permissions_replay.py", "permissions_replay_tests.py", "permissions-replay-probe.ts",
+        "legacy_state_sensor.py", "legacy_state_sensor_tests.py",
+        "completion_budget.py", "completion_budget_tests.py",
         "install-check.py", "index-probe.ts", "installed-probe.ts",
         "isolated-check.py", "isolated_check_tests.py", "self_test_controls.py",
     )),
@@ -93,10 +96,25 @@ def documentation():
     return f"{count} local links resolve"
 
 
-def tracked():
+def source_paths(mode):
+    if mode == "committed":
+        return set(command("git", "ls-files").splitlines())
     paths = set(command("git", "ls-files").splitlines())
-    assert REQUIRED <= paths, f"untracked required paths: {sorted(REQUIRED - paths)}"
-    return f"{len(REQUIRED)} required tracked paths"
+    paths.update(path.relative_to(ROOT).as_posix() for path in ROOT.rglob("*")
+                 if path.is_file() and ".git" not in path.parts and ".venv" not in path.parts
+                 and "__pycache__" not in path.parts)
+    return paths
+
+
+def tracked(mode):
+    paths = source_paths(mode)
+    missing = REQUIRED - paths
+    assert not missing, f"missing required paths: {sorted(missing)}"
+    if mode == "working-tree":
+        for name in REQUIRED:
+            path = ROOT / name
+            assert path.is_file() and not path.is_symlink(), f"unsafe working-tree source: {name}"
+    return f"{len(REQUIRED)} required {mode} paths"
 
 
 def exclusions():
@@ -119,12 +137,19 @@ def artifact():
 
 
 if __name__ == "__main__":
+    mode = "committed"
+    if sys.argv[1:] == ["--source", "working-tree"]:
+        mode = "working-tree"
+    elif sys.argv[1:] not in ([], ["--source", "committed"]):
+        raise SystemExit("usage: package-check.py [--source committed|working-tree]")
     failures = 0
-    for check in (metadata, documentation, tracked, exclusions, artifact):
+    checks = ((metadata.__name__, metadata), (documentation.__name__, documentation),
+              ("tracked", lambda: tracked(mode)), (exclusions.__name__, exclusions), (artifact.__name__, artifact))
+    for name, check in checks:
         try:
-            print(f"PASS {check.__name__}: {check()}")
+            print(f"PASS {name}: {check()}")
         except (AssertionError, subprocess.SubprocessError) as error:
             failures += 1
-            print(f"FAIL {check.__name__}: {error}", file=sys.stderr)
+            print(f"FAIL {name}: {error}", file=sys.stderr)
     print(f"package boundary checks: {5 - failures}/5 passed")
     sys.exit(bool(failures))

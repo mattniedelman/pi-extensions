@@ -42,6 +42,8 @@ def isolated_environment(source=None, *, discover_extensions=False):
     # An allowlist avoids forwarding model/cloud credentials, session identity,
     # extension hooks (NODE_OPTIONS/PYTHONPATH), or personal loadout overrides.
     env = {key: source[key] for key in ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM") if key in source}
+    if source.get("UV_OFFLINE") == "1":
+        env["UV_OFFLINE"] = "1"
     cache = source.get("UV_CACHE_DIR", str(Path(source.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "uv"))
     cache = str(Path(cache).resolve())
     with tempfile.TemporaryDirectory(prefix="pi-isolated-check-") as directory:

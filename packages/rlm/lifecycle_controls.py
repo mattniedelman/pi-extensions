@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Offline controls for the installed real-pi lifecycle adapter; no inference."""
 import copy
-import json
 import subprocess
 import sys
 from pathlib import Path

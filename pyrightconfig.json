@@ -1,0 +1,10 @@
+{
+  "venvPath": "packages/rlm/python",
+  "venv": ".venv",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["packages/rlm/python"]
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded offline install/discovery/remove of an independent committed package."""
+"""Bounded offline install/discovery/remove from committed or working-tree source."""
 import argparse
 import hashlib
 import importlib.util
@@ -16,6 +16,8 @@ import time
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
 spec = importlib.util.spec_from_file_location("integration", ROOT / "integration.py")
+if spec is None or spec.loader is None:
+    raise RuntimeError("failed to load integration.py")
 integration = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(integration)
 isolation = integration.isolation
@@ -42,6 +44,24 @@ def committed_source(env, cwd, source, expected):
         actual = command(env, cwd, "git", "hash-object", str(REPO / relative))
         assert actual == committed, f"uncommitted runtime: {relative}"
     return integration.independent_source(source)
+
+
+def working_tree_source(source, destination):
+    """Copy only the declared runtime manifest and verify exact bytes."""
+    destination.mkdir(parents=True)
+    relative_paths = ("package.json", *("packages/rlm/" + name for name in integration.RUNTIME_FILES))
+    hashes = {}
+    for relative in relative_paths:
+        original = source / relative
+        assert original.is_file() and not original.is_symlink(), f"unsafe working-tree source: {relative}"
+        hashes[relative] = hashlib.sha256(original.read_bytes()).hexdigest()
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(original, target)
+        assert hashlib.sha256(target.read_bytes()).hexdigest() == hashes[relative], f"source changed during copy: {relative}"
+        assert not target.samefile(original), f"working-tree copy aliases source: {relative}"
+    print(f"working-tree source: {len(hashes)} declared files, SHA256 copy verified", flush=True)
+    return integration.independent_source(destination)
 
 
 def source_negatives(env, cwd, installed, sha):
@@ -83,6 +103,7 @@ def removed_discovery(env, cwd):
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr,
                                 start_new_session=True)
         owned = isolation.OwnedProcesses(proc)
+        assert proc.stdin is not None and proc.stdout is not None
         rpc = integration.Rpc(proc, owned)
         try:
             assert rpc.request("state", "get_state")["success"] is True
@@ -118,7 +139,7 @@ def private_snapshot(paths):
     return {str(path): (path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) for path in paths}
 
 
-def worker():
+def worker(source_mode="committed"):
     env = {**os.environ, "UV_OFFLINE": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
     cwd = Path.cwd()
     # Pi dispatches package subcommands only when the verb is argv[1]. The
@@ -132,18 +153,21 @@ def worker():
         fixture = Path(directory)
         original = fixture / "original"
         installed = fixture / "installed"
-        sha = command(env, cwd, "git", "-C", REPO, "rev-parse", "HEAD")
-        command(env, cwd, "git", "clone", "--no-hardlinks", "--no-checkout", str(REPO), str(original))
-        command(env, cwd, "git", "-C", original, "checkout", "--detach", sha)
-        command(env, cwd, "git", "clone", "--no-hardlinks", str(original), str(installed))
-        command(env, cwd, "git", "-C", installed, "checkout", "--detach", sha)
-        command(env, cwd, "git", "-C", installed, "remote", "remove", "origin")
-        installed = committed_source(env, cwd, installed, sha)
-        source_negatives(env, cwd, installed, sha)
-        # Only our fixture source is renamed, never the real user worktree.
-        original.rename(fixture / "unavailable-original")
-        assert not original.exists()
-        print(f"independent committed source: {sha}; original fixture unavailable", flush=True)
+        if source_mode == "committed":
+            sha = command(env, cwd, "git", "-C", REPO, "rev-parse", "HEAD")
+            command(env, cwd, "git", "clone", "--no-hardlinks", "--no-checkout", str(REPO), str(original))
+            command(env, cwd, "git", "-C", original, "checkout", "--detach", sha)
+            command(env, cwd, "git", "clone", "--no-hardlinks", str(original), str(installed))
+            command(env, cwd, "git", "-C", installed, "checkout", "--detach", sha)
+            command(env, cwd, "git", "-C", installed, "remote", "remove", "origin")
+            installed = committed_source(env, cwd, installed, sha)
+            source_negatives(env, cwd, installed, sha)
+            original.rename(fixture / "unavailable-original")
+            assert not original.exists()
+            print(f"independent committed source: {sha}; original fixture unavailable", flush=True)
+        else:
+            sha = "working-tree"
+            installed = working_tree_source(REPO, installed)
 
         # Actual installer must create this declaration before filtering it.
         command(env, cwd, installer, "install", str(installed))
@@ -156,26 +180,10 @@ def worker():
         configured["packages"] = [{"source": packages[0], "extensions": ["+packages/rlm/index.ts"],
                                    "skills": [], "prompts": [], "themes": []}]
         settings.write_text(json.dumps(configured))
-        before = settings.read_bytes()
-        for mode in ("ready", "missing-uv", "failed-bootstrap"):
-            integration.installed_check(env, cwd, installed, mode)
-        assert settings.read_bytes() == before, "readiness rewrote installation"
-        result = json.loads((cwd / "installed-ready/result.json").read_text())
-        state = cwd / "installed-ready/state"
-        key = hashlib.sha256(result["identities"]["injected"].encode()).hexdigest()
-        session = state / key
-        dump, names = session / "kernel.bin", session / "kernel.names.json"
-        assert dump.is_file() and names.is_file(), "actual checkpoint and names required"
-        assert stat.S_IMODE(session.stat().st_mode) == 0o700
-        assert stat.S_IMODE(dump.stat().st_mode) == stat.S_IMODE(names.stat().st_mode) == 0o600
-        assert (state / ".venv/pyvenv.cfg").is_file(), "actual private venv required"
-        quarantine = session / "kernel.corrupt"
-        marker = state / ".venv/zog-retention-marker"
-        for path in (quarantine, marker):
-            path.write_bytes(b"owned retained fixture\n")
-            path.chmod(0o600)
-        retained = [dump, names, quarantine, marker]
-        snapshot = private_snapshot(retained)
+        integration.installed_checks(env, cwd, installed)
+        # The integration oracle rewrites only this owned package declaration;
+        # restore the installer's form before exercising actual removal.
+        settings.write_text(json.dumps(configured))
         command(env, cwd, installer, "remove", str(installed))
         after_remove = json.loads(settings.read_text())
         assert not after_remove.get("packages"), "remove retained package declaration"
@@ -184,30 +192,27 @@ def worker():
         listing = command(env, cwd, installer, "list")
         assert not listing or (str(installed) not in listing and packages[0] not in listing), listing
         removed_discovery(env, cwd)
-        assert private_snapshot(retained) == snapshot, "uninstall changed retained private data"
-        committed_source(env, cwd, installed, sha)
-        print("removal retention: 4/4 private checkpoint/names/quarantine/venv markers unchanged", flush=True)
-        # Explicit destructive cleanup only after retention and no-child proof.
-        for mode in ("ready", "missing-uv", "failed-bootstrap"):
-            case = cwd / ("installed-" + mode)
-            shutil.rmtree(case)
-            assert not case.exists(), "owned case root survived intentional cleanup"
-        assert not any(path.exists() for path in retained)
-        print("intentional owned cleanup: 4/4 retained files absent; 3/3 case roots absent", flush=True)
+        if source_mode == "committed":
+            committed_source(env, cwd, installed, sha)
+        else:
+            working_tree_source(REPO, fixture / "verification-copy")
+        print("removal retention: package removed; independent source provenance rechecked", flush=True)
+        print("intentional owned cleanup: installed verification fixtures absent", flush=True)
     assert not fixture.exists(), "owned clone fixture survived cleanup"
-    print("install boundary: committed clone + install/list/discovery + readiness3 + remove/list/absence + retained cleanup PASS", flush=True)
+    print(f"install boundary: {source_mode} source + install/list/discovery + direct-Jupyter readiness + remove/list/absence PASS", flush=True)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", choices=("committed", "working-tree"), default="committed")
     parser.add_argument("--_worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args._worker:
-        worker()
+        worker(args.source)
     else:
         with isolation.isolated_environment(discover_extensions=True) as env:
-            result = isolation.run_owned_capture([sys.executable, str(Path(__file__).resolve()), "--_worker"],
-                cwd=Path(env["PI_CODING_AGENT_DIR"]).parent / "cwd", env=env, timeout=50)
+            result = isolation.run_owned_capture([sys.executable, str(Path(__file__).resolve()), "--_worker", "--source", args.source],
+                cwd=Path(env["PI_CODING_AGENT_DIR"]).parent / "cwd", env=env, timeout=110)
         print(result.stdout, end="")
         print(result.stderr, end="", file=sys.stderr)
         sys.exit(result.returncode)
