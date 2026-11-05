@@ -137,26 +137,29 @@ usage accounting.
 
 ## Verification
 
-Focused checks from the repository root use the prepared offline cache and do
+Focused checks from the repository root use the locked test dependency group and do
 not require model inference:
 
 ```bash
-UV_OFFLINE=1 UV_CACHE_DIR=/tmp/pi-jupyter-qualification-mnPje0/cache/uv \
+UV_OFFLINE=1 UV_CACHE_DIR=/tmp/pi-jupyter-qualification-cache \
   uv lock --project packages/rlm/python --check
 
+UV_OFFLINE=1 UV_PROJECT_ENVIRONMENT=/tmp/pi-jupyter-qualification-venv \
+  UV_CACHE_DIR=/tmp/pi-jupyter-qualification-cache \
+  uv sync --project packages/rlm/python --group test --locked
+
 UV_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 timeout 120s \
-  /tmp/pi-jupyter-qualification-mnPje0/venv/bin/python \
-  -W error::ResourceWarning -W error::DeprecationWarning \
-  -m unittest -v \
+  uv run --project packages/rlm/python --group test --locked \
+  python -W error::ResourceWarning -W error::DeprecationWarning -m unittest -v \
   packages/rlm/python/bootstrap_tests.py \
   packages/rlm/python/jupyter_sidecar_tests.py \
   packages/rlm/python/cancellation_tests.py \
   packages/rlm/python/operations_tests.py
 
-UV_OFFLINE=1 UV_CACHE_DIR=/tmp/pi-jupyter-qualification-mnPje0/cache/uv \
+UV_OFFLINE=1 UV_CACHE_DIR=/tmp/pi-jupyter-qualification-cache \
   timeout 120s node packages/rlm/check.mjs
 
-UV_OFFLINE=1 UV_CACHE_DIR=/tmp/pi-jupyter-qualification-mnPje0/cache/uv \
+UV_OFFLINE=1 UV_CACHE_DIR=/tmp/pi-jupyter-qualification-cache \
   HINDSIGHT_DISABLED=true PYTHONDONTWRITEBYTECODE=1 \
   timeout 120s python3 packages/rlm/integration.py
 
@@ -170,8 +173,9 @@ separate Linux-only command because it runs a deliberate installed-source mutant
 
 ```bash
 env PYTHONDONTWRITEBYTECODE=1 HINDSIGHT_DISABLED=true UV_OFFLINE=1 \
-  UV_CACHE_DIR=/tmp/pi-jupyter-qualification-mnPje0/cache/uv \
-  timeout 235s python3 packages/rlm/integration.py --case legacy-state
+  UV_CACHE_DIR=/tmp/pi-jupyter-qualification-cache \
+  timeout 235s uv run --project packages/rlm/python --group test --locked \
+  python3 packages/rlm/integration.py --case legacy-state
 ```
 
 The working tree can be checked without staging through the package check's

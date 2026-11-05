@@ -34,6 +34,8 @@ BOOTSTRAP_INVENTORY = {
     "test_fixed_zero_skip_inventory",
 }
 JUPYTER_INVENTORY = {
+    "test_scalar_and_array_json_fail_then_terminate_reader",
+    "test_oversized_frame_fails_then_terminates_reader",
     "test_01_provenance_numpy_and_retained_objects",
     "test_02_stdout_stderr_expression_and_display_data",
     "test_03_non_json_literals_fall_back_to_text_plain",
@@ -54,6 +56,7 @@ JUPYTER_INVENTORY = {
     "test_actual_kernel_readiness_failure_cleans_up_sidecar",
     "test_partial_startup_failures_clean_up_started_resources",
     "test_cleanup_failures_are_notes_on_primary_startup_error",
+    "test_manager_constructor_failure_closes_bridge",
     "test_reset_shuts_down_old_kernel_when_channel_cleanup_fails",
     "test_ignores_unrelated_messages_and_requires_matching_reply_and_idle",
     "test_matching_error_is_reported_after_both_completion_boundaries",
@@ -71,6 +74,7 @@ OPERATIONS_INVENTORY = {
     "test_sidecar_state_argument_is_optional_ignored_compatibility",
 }
 CANCELLATION_INVENTORY = {
+    "test_abort_during_submit_never_dispatches_revoked_tool",
     "test_matching_idle_after_interrupt_retains_generation_and_namespace",
     "test_no_idle_uses_one_public_bounded_shutdown_and_rotates_generation",
     "test_shutdown_cleanup_failure_is_terminal_and_disables_restart",
@@ -94,12 +98,11 @@ def test_names(module):
 
 class BootstrapTests(unittest.TestCase):
     def test_exact_project_and_lock_roots(self):
-        project = tomllib.loads(PROJECT.read_text())["project"]
+        project_data = tomllib.loads(PROJECT.read_text())
+        project = project_data["project"]
         self.assertEqual(project["requires-python"], ">=3.13,<3.14")
-        self.assertEqual(
-            project["dependencies"],
-            [f"{name}=={version}" for name, version in PRODUCTION_PINS.items()],
-        )
+        self.assertEqual(project["dependencies"], [f"{name}=={version}" for name, version in PRODUCTION_PINS.items()])
+        self.assertEqual(project_data["dependency-groups"]["test"], ["numpy==2.3.4"])
 
         lock = tomllib.loads(LOCK.read_text())
         self.assertEqual(lock["requires-python"], "==3.13.*")
@@ -117,6 +120,11 @@ class BootstrapTests(unittest.TestCase):
             {name: packages[name]["version"] for name in PRODUCTION_PINS},
             PRODUCTION_PINS,
         )
+        test_group = packages["pi-rlm-sidecar"]["metadata"]["requires-dev"]["test"]
+        self.assertEqual(
+            {item["name"]: item["specifier"] for item in test_group if item["name"] == "numpy"},
+            {"numpy": "==2.3.4"},
+        )
         self.assertNotIn("numpy", {dependency["name"] for dependency in root["dependencies"]})
         self.assertNotIn("pydantic-monty", packages)
 
@@ -132,7 +140,7 @@ class BootstrapTests(unittest.TestCase):
         real_import = __import__
 
         def missing(name, *args, **kwargs):
-            if name == "jupyter_client":
+            if name in ("jupyter_client", "jupyter_client.manager"):
                 error = ModuleNotFoundError("No module named 'jupyter_client'")
                 error.name = "jupyter_client"
                 raise error
@@ -255,7 +263,7 @@ class BootstrapTests(unittest.TestCase):
                 unittest.defaultTestLoader.loadTestsFromModule(operations_tests),
             ]
         )
-        self.assertEqual(combined.countTestCases(), 49)
+        self.assertEqual(combined.countTestCases(), 53)
         self.assertNotIn("skip", PROJECT.read_text().lower())
 
 
