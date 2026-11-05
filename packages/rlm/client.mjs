@@ -109,7 +109,7 @@ async function waitForRetirement(exit, timeoutMs, remaining) {
 
 export class SidecarClient {
   constructor(options) {
-    this.options = { env: process.env, requestTimeoutMs: 10000, startupTimeoutMs: 120000, ...options };
+    this.options = { env: process.env, requestTimeoutMs: 10000, cancellationTimeoutMs: 15000, startupTimeoutMs: 120000, ...options };
     this.pending = new Map();
     this.nextId = 1;
     this.queue = Promise.resolve();
@@ -226,7 +226,8 @@ export class SidecarClient {
           return;
         }
         clearTimeout(request.timer);
-        Promise.resolve(request.onToolCall(message.name, message.args))
+        Promise.resolve()
+          .then(() => request.onToolCall(message.name, message.args))
           .then((result) => {
             if (this.child !== child || this.pending.get(message.id) !== request) return;
             if (Buffer.byteLength(JSON.stringify(result)) > MAX_PAYLOAD_BYTES) throw new Error(`pi tool result exceeds ${MAX_PAYLOAD_BYTES} bytes`);
@@ -289,6 +290,10 @@ export class SidecarClient {
         abortSent = true;
         activeRequest.aborted = true;
         clearTimeout(activeRequest.timer);
+        activeRequest.timer = setTimeout(() => {
+          this.fail(new Error(`RLM kernel cancellation timed out after ${this.options.cancellationTimeoutMs}ms`));
+          this.stopChild();
+        }, this.options.cancellationTimeoutMs);
         try {
           this.child.stdin.write(serializedFrame({ id: activeRequest.id, operation: "abort" }));
         } catch (writeError) {
@@ -309,6 +314,7 @@ export class SidecarClient {
         if (this.closed) {
           await this.stopChild();
           if (this.stopping) throw new Error("RLM kernel is shutting down");
+          if (signal?.aborted) throw new Error("RLM kernel request aborted");
           this.start();
         }
         if (signal?.aborted) throw new Error("RLM kernel request aborted");
@@ -321,6 +327,7 @@ export class SidecarClient {
           throw new Error(notice);
         }
         const id = this.nextId++;
+        const frame = serializedFrame({ id, operation, code, tools });
         const barrier = new Promise((barrierResolve, barrierReject) => {
           const request = {
             id,
@@ -349,7 +356,7 @@ export class SidecarClient {
           request.armTimeout();
           this.pending.set(id, request);
         });
-        this.child.stdin.write(serializedFrame({ id, operation, code, tools }));
+        this.child.stdin.write(frame);
         await barrier;
       } catch (error) {
         detach(activeRequest);

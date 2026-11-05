@@ -35,6 +35,7 @@ const fake = `
         if (!mode.includes('stubborn')) process.exit(0);
       } else if (msg.operation === 'abort') {
         abortIds.push(msg.id);
+        if (mode === 'stuck-abort') return;
         const forced = mode === 'forced-retirement';
         forcedRetired = forcedRetired || forced;
         console.log(JSON.stringify({id: msg.id, ok: true, result: {
@@ -62,7 +63,7 @@ const fake = `
         console.log(frame);
       } else if (msg.type === 'tool_result') {
         console.log(JSON.stringify({id: msg.id, ok: true, result: {error: msg.error}}));
-      } else if (mode !== 'ready-stubborn' && (mode !== 'forced-retirement' || forcedRetired)) {
+      } else if (mode !== 'ready-stubborn' && mode !== 'stuck-abort' && (mode !== 'forced-retirement' || forcedRetired)) {
         console.log(JSON.stringify({id: msg.id, ok: true, result: {pid: process.pid, requestId: msg.id, abortIds}}));
       }
     });
@@ -135,6 +136,23 @@ export async function lifecycleChecks(cwd) {
       assert.notEqual(fresh.child.pid, child.child.pid);
       await bounded(client.close(), "timed out request close");
       await bounded(fresh.exit, "restarted timeout child exit");
+    }],
+    ["stuck cancellation retires sidecar and releases queue", async (make, track) => {
+      const client = make("stuck-abort", { cancellationTimeoutMs: 50 });
+      const child = track(client.child);
+      const controller = new AbortController();
+      const active = rejects(client.request("execute", "1", controller.signal), /aborted/);
+      await bounded(client.ready, "stuck cancellation ready");
+      controller.abort();
+      await bounded(active, "stuck cancellation caller abort");
+      client.options.args = ["-e", fake, "ready"];
+      const restarted = await bounded(client.request("variables"), "restart after stuck cancellation", 3000);
+      const fresh = track(client.child);
+      assert.notEqual(fresh.child, child.child, "request after stuck cancellation must use a fresh sidecar");
+      assert.equal(restarted.pid, fresh.child.pid);
+      assert.equal(child.exited, true, "cancellation watchdog must retire the stuck sidecar");
+      await bounded(client.close(), "stuck cancellation close");
+      await bounded(fresh.exit, "stuck cancellation restarted child exit");
     }],
     ["concurrent close waits for stubborn child", async (make, track) => {
       const client = make("ready-stubborn");
@@ -239,6 +257,14 @@ export async function lifecycleChecks(cwd) {
       finish({ content: "late", structured: null, is_error: false });
       await delay(20);
       await bounded(client.close(), "idempotent close");
+    }],
+    ["synchronous nested tool failure returns an error", async (make, track) => {
+      const client = make("ready");
+      const child = track(client.child);
+      const result = await bounded(client.request("execute", "rejected-tool", undefined, () => { throw new Error("sync rejected"); }), "sync nested rejection");
+      assert.match(result.error, /sync rejected/);
+      await bounded(client.close(), "sync nested rejection close");
+      await bounded(child.exit, "sync nested rejection child exit");
     }],
     ["escaped tool rejection at payload cap", async (make, track) => {
       const client = make("ready");
@@ -354,6 +380,6 @@ export async function lifecycleChecks(cwd) {
   console.log(`rlm lifecycle checks passed: ${cases.length}/${cases.length}; ${observed} owned children, 0 survivors BEFORE backup`);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   await lifecycleChecks(process.cwd());
 }

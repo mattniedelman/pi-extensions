@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import tomllib
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -139,7 +140,15 @@ class RegistrationTests(unittest.TestCase):
     def test_working_tree_source_accepts_declared_new_files(self):
         checker = load_checker("working_tree_source_contract")
         self.assertIn("required working-tree paths", checker.tracked("working-tree"))
-        with self.assertRaisesRegex(AssertionError, "missing required paths"):
+        self.assertIn("required committed paths", checker.tracked("committed"))
+        original = checker.command
+
+        def command(*args):
+            if args[:4] == ("git", "ls-tree", "-r", "--name-only"):
+                return "\n".join(sorted(checker.REQUIRED - {"packages/rlm/python/operations_tests.py"}))
+            return original(*args)
+
+        with mock.patch.object(checker, "command", side_effect=command), self.assertRaisesRegex(AssertionError, "missing required paths"):
             checker.tracked("committed")
 
     def test_working_tree_source_rejects_symlink(self):

@@ -98,7 +98,7 @@ def documentation():
 
 def source_paths(mode):
     if mode == "committed":
-        return set(command("git", "ls-files").splitlines())
+        return set(command("git", "ls-tree", "-r", "--name-only", "HEAD").splitlines())
     paths = set(command("git", "ls-files").splitlines())
     paths.update(path.relative_to(ROOT).as_posix() for path in ROOT.rglob("*")
                  if path.is_file() and ".git" not in path.parts and ".venv" not in path.parts

@@ -48,6 +48,22 @@ class InterruptLifecycleTests(unittest.TestCase):
         finally:
             kernel.close()
 
+    def test_abort_during_submit_never_dispatches_revoked_tool(self):
+        emitted = []
+        manager = support.FakeManager(
+            [self.message("execute_reply", status="abort")],
+            [self.message("status", execution_state="idle")],
+        )
+        kernel = sidecar.Kernel(Path("ignored"), manager_factory=lambda: manager, emit=emitted.append)
+        manager.client_instance.execute = lambda code, **kwargs: (kernel.abort("race"), "wanted")[1]
+        try:
+            result = kernel.execute("race", "while True: pass", [])
+            self.assertTrue(result["aborted"])
+            self.assertIsNone(kernel.bridge.registry.requests.get("race"))
+            self.assertEqual(emitted, [])
+        finally:
+            kernel.close()
+
     def test_no_idle_uses_one_public_bounded_shutdown_and_rotates_generation(self):
         kernel, manager = self.kernel([], [])
         old_generation = kernel.generation
@@ -69,7 +85,7 @@ class InterruptLifecycleTests(unittest.TestCase):
 
     def test_retirement_deadline_covers_shutdown_and_replacement_startup(self):
         kernel, manager = self.kernel([], [])
-        starts = iter([0.0, 0.02, 0.08])
+        starts = iter([0.0, 0.02, 0.08] + [0.08] * 30)
         ready_deadlines = []
         original_start = kernel._start
 

@@ -1,5 +1,6 @@
 import importlib.metadata
 import json
+import queue
 import select
 import subprocess
 import sys
@@ -15,6 +16,34 @@ ROOT = Path(__file__).parent
 SIDECAR = ROOT / "sidecar.py"
 sys.path.insert(0, str(ROOT))
 import sidecar
+
+
+class InputReaderTests(unittest.TestCase):
+    def run_reader(self, payload):
+        class Stdin:
+            buffer = tempfile.TemporaryFile()
+
+        requests = queue.Queue()
+        Stdin.buffer.write(payload)
+        Stdin.buffer.seek(0)
+        with mock.patch.object(sidecar.sys, "stdin", Stdin):
+            reader = sidecar.InputReader(requests, lambda: None)
+            reader.start()
+            reader.join(1)
+        self.assertFalse(reader.is_alive())
+        return requests.get_nowait(), requests.get_nowait()
+
+    def test_scalar_and_array_json_fail_then_terminate_reader(self):
+        for payload in (b"42\n", b"[]\n"):
+            with self.subTest(payload=payload):
+                failure, terminal = self.run_reader(payload)
+                self.assertIn("top-level JSON must be an object", failure["_input_error"])
+                self.assertIsNone(terminal)
+
+    def test_oversized_frame_fails_then_terminates_reader(self):
+        failure, terminal = self.run_reader(b"x" * (sidecar.MAX_FRAME_BYTES + 1) + b"\n")
+        self.assertIn("input frame exceeds", failure["_input_error"])
+        self.assertIsNone(terminal)
 
 
 class ActualKernelTests(unittest.TestCase):
@@ -452,6 +481,21 @@ class StartupCleanupTests(unittest.TestCase):
             ["channel cleanup failed: stop failed", "kernel cleanup failed: shutdown failed"],
         )
 
+    def test_manager_constructor_failure_closes_bridge(self):
+        bridges = []
+        original = sidecar.BridgeServer
+
+        def bridge(*args, **kwargs):
+            value = original(*args, **kwargs)
+            bridges.append(value)
+            return value
+
+        with mock.patch.object(sidecar, "BridgeServer", side_effect=bridge), self.assertRaisesRegex(RuntimeError, "constructor failed"):
+            sidecar.Kernel(Path("ignored"), manager_factory=lambda: (_ for _ in ()).throw(RuntimeError("constructor failed")))
+        self.assertEqual(len(bridges), 1)
+        self.assertTrue(bridges[0].closed)
+        self.assertFalse(bridges[0].thread.is_alive())
+
     def test_reset_shuts_down_old_kernel_when_channel_cleanup_fails(self):
         manager = FakeManager([], [])
 
@@ -465,7 +509,12 @@ class StartupCleanupTests(unittest.TestCase):
             kernel.reset()
         self.assertTrue(manager.shutdown)
         self.assertTrue(kernel.closed)
+        self.assertTrue(kernel.terminal_cleanup_failure)
         self.assertFalse(kernel.bridge.thread.is_alive())
+        with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+            kernel.variables("later")
+        with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+            kernel.reset()
 
 
 class KernelRevocationTests(unittest.TestCase):

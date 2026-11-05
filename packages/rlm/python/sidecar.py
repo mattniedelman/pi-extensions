@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from jupyter_client import KernelManager
+    from jupyter_client.manager import KernelManager
 except ModuleNotFoundError as exc:
     if exc.name != "jupyter_client":
         raise
@@ -28,6 +28,8 @@ MAX_PAYLOAD_BYTES = 256 * 1024
 MAX_CALLS_PER_CELL = 64
 EXPIRED_CONTEXT = "pi tool context expired"
 INTERRUPT_IDLE_TIMEOUT = 2.0
+STARTUP_DEADLINE = 10.0
+OPERATION_DEADLINE = 10.0
 SHUTDOWN_DEADLINE = 9.0
 STATE_LOST_NOTICE = "Python workspace was lost after the interrupted kernel did not become idle"
 RESET_NOTICE = "Python workspace reset; previous live state was discarded"
@@ -107,6 +109,31 @@ def raw_payload_size(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
+def bounded_call(label: str, function: Callable[[], Any], timeout: float) -> Any:
+    if timeout <= 0:
+        if label == "Jupyter channel cleanup":
+            raise TimeoutError(f"Jupyter channel cleanup exceeded its {SHUTDOWN_DEADLINE:g}-second deadline")
+        raise TimeoutError(f"{label} exceeded its deadline")
+    result: list[Any] = []
+    failure: list[BaseException] = []
+    finished = threading.Event()
+
+    def invoke() -> None:
+        try:
+            result.append(function())
+        except BaseException as exc:
+            failure.append(exc)
+        finally:
+            finished.set()
+
+    threading.Thread(target=invoke, daemon=True).start()
+    if not finished.wait(timeout):
+        raise TimeoutError(f"{label} exceeded its {timeout:g}-second deadline")
+    if failure:
+        raise failure[0]
+    return result[0] if result else None
+
+
 def message_type(message: dict[str, Any]) -> str | None:
     return message.get("msg_type") or message.get("header", {}).get("msg_type")
 
@@ -141,14 +168,22 @@ class CellRegistry:
             self.requests[request_id] = cell_id
             return cell_id
 
-    def map(self, cell_id: int, msg_id: str) -> None:
+    def map(self, cell_id: int, msg_id: str) -> bool:
         with self.condition:
-            cell = self.cells[cell_id]
+            cell = self.cells.get(cell_id)
+            if cell is None:
+                return False
+            if cell["state"] == "aborted-unmapped":
+                cell["msg_id"] = msg_id
+                cell["state"] = "aborted-active"
+                self.condition.notify_all()
+                return True
             if cell["state"] != "allocated-unmapped" or cell["msg_id"] is not None:
                 raise RuntimeError("cell may be mapped exactly once")
             cell["msg_id"] = msg_id
             cell["state"] = "mapped-active"
             self.condition.notify_all()
+            return True
 
     def dispatch(self, message: dict[str, Any]) -> dict[str, Any]:
         generation = message.get("generation")
@@ -162,6 +197,9 @@ class CellRegistry:
                 raise RuntimeError(EXPIRED_CONTEXT)
             while cell["state"] == "allocated-unmapped":
                 self.condition.wait()
+            if cell["state"] == "aborted-active":
+                self._revoke_locked(cell_id)
+                raise RuntimeError(EXPIRED_CONTEXT)
             if cell["state"] != "mapped-active":
                 raise RuntimeError(EXPIRED_CONTEXT)
             if not isinstance(call_id, int) or call_id != cell["next_call"] or call_id > MAX_CALLS_PER_CELL:
@@ -220,6 +258,11 @@ class CellRegistry:
     def revoke_request(self, request_id: Any) -> None:
         with self.condition:
             cell_id = self.requests.get(request_id)
+            cell = self.cells.get(cell_id) if cell_id is not None else None
+            if cell is not None and cell["state"] == "allocated-unmapped":
+                cell["state"] = "aborted-unmapped"
+                self.condition.notify_all()
+                return
             if cell_id is not None:
                 self._revoke_locked(cell_id)
 
@@ -361,6 +404,7 @@ class Kernel:
         self.install_kernel_helpers = manager_factory is KernelManager
         self.emit = emit or (lambda _message: None)
         self.client: Any = None
+        self.manager: Any = None
         self.closed = False
         self.terminal_cleanup_failure = False
         self._abort_condition = threading.Condition()
@@ -370,32 +414,38 @@ class Kernel:
     def _start(self, *, deadline: float | None = None) -> None:
         self.generation = secrets.token_hex(16)
         self.bridge = BridgeServer(self.generation, self.emit)
-        self.manager = self.manager_factory()
+        self.manager = None
         kernel_start_attempted = False
         kernel_started = False
         channels_start_attempted = False
+        start_deadline = deadline if deadline is not None else time.monotonic() + STARTUP_DEADLINE
+
+        def call(label: str, function: Callable[[], Any]) -> Any:
+            return bounded_call(label, function, start_deadline - time.monotonic())
+
         try:
+            self.manager = call("Jupyter manager construction", self.manager_factory)
             kernel_start_attempted = True
-            self.manager.start_kernel()
+            call("Jupyter kernel startup", self.manager.start_kernel)
             kernel_started = True
-            self.client = self.manager.blocking_client()
+            self.client = call("Jupyter client construction", self.manager.blocking_client)
             channels_start_attempted = True
-            self.client.start_channels()
-            ready_timeout = 10.0 if deadline is None else max(0.0, deadline - time.monotonic())
+            call("Jupyter channel startup", self.client.start_channels)
+            ready_timeout = start_deadline - time.monotonic()
             if ready_timeout <= 0:
                 raise TimeoutError("kernel replacement exceeded retirement deadline")
-            self.client.wait_for_ready(timeout=ready_timeout)
+            call("Jupyter kernel readiness", lambda: self.client.wait_for_ready(timeout=ready_timeout))
             self.variables_helper = f"__pi_variables_{secrets.token_hex(16)}"
             if self.install_kernel_helpers:
-                self._install_variables_helper()
+                self._install_variables_helper(start_deadline)
             close_jupyter_event_loop()
         except Exception as exc:
             cleanup_notes = []
-            if channels_start_attempted:
-                try: self.client.stop_channels()
+            if channels_start_attempted and self.client is not None:
+                try: call("Jupyter channel cleanup", self.client.stop_channels)
                 except Exception as cleanup_exc: cleanup_notes.append(f"channel cleanup failed: {cleanup_exc}")
-            if kernel_start_attempted:
-                try: self.manager.shutdown_kernel(now=True)
+            if kernel_start_attempted and self.manager is not None:
+                try: call("Jupyter kernel cleanup", lambda: self.manager.shutdown_kernel(now=True))
                 except Exception as cleanup_exc: cleanup_notes.append(f"kernel cleanup failed: {cleanup_exc}")
             self.bridge.close()
             close_jupyter_event_loop()
@@ -412,7 +462,7 @@ class Kernel:
                 raise
             raise error from exc
 
-    def _install_variables_helper(self) -> None:
+    def _install_variables_helper(self, deadline: float) -> None:
         source = "\n".join([
             "import base64 as __pi_b64, json as __pi_json",
             "def __pi_make_variables(__pi_ns, __pi_publish, __pi_dumps, __pi_encode, __pi_str, __pi_type, __pi_sorted, __pi_len):",
@@ -430,13 +480,21 @@ class Kernel:
             f"{self.variables_helper} = __pi_make_variables(get_ipython().user_ns, get_ipython().display_pub.publish, __pi_json.dumps, __pi_b64.b64encode, str, type, sorted, len)",
             "del __pi_make_variables, __pi_b64, __pi_json",
         ])
-        msg_id = self.client.execute(source, silent=True, allow_stdin=False, store_history=False, stop_on_error=True)
+        msg_id = bounded_call(
+            "variables helper submission",
+            lambda: self.client.execute(source, silent=True, allow_stdin=False, store_history=False, stop_on_error=True),
+            deadline - time.monotonic(),
+        )
         error = None
         idle = shell_reply = False
         while not shell_reply or not idle:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("variables helper installation exceeded its deadline")
+            timeout = min(0.05, remaining)
             if not shell_reply:
                 try:
-                    message = self.client.shell_channel.get_msg(timeout=0.05)
+                    message = self.client.shell_channel.get_msg(timeout=timeout)
                     if parent_id(message) == msg_id and message_type(message) == "execute_reply":
                         shell_reply = True
                         if message.get("content", {}).get("status") != "ok":
@@ -445,7 +503,7 @@ class Kernel:
                     pass
             if not idle:
                 try:
-                    message = self.client.iopub_channel.get_msg(timeout=0.05)
+                    message = self.client.iopub_channel.get_msg(timeout=timeout)
                 except queue.Empty:
                     message = None
                 if message is not None and parent_id(message) == msg_id:
@@ -460,6 +518,13 @@ class Kernel:
     def _was_aborted(self, request_id: Any) -> bool:
         with self._abort_condition:
             return request_id in self._aborted_requests
+
+    def _consume_abort(self, request_id: Any) -> bool:
+        with self._abort_condition:
+            if request_id not in self._aborted_requests:
+                return False
+            self._aborted_requests.discard(request_id)
+            return True
 
     def _retire_after_failed_interrupt(self) -> dict[str, Any]:
         old_bridge = self.bridge
@@ -483,22 +548,17 @@ class Kernel:
         worker.start()
         retirement_deadline = time.monotonic() + SHUTDOWN_DEADLINE
         completed = finished.wait(max(0.0, retirement_deadline - time.monotonic()))
-        try:
-            old_client.stop_channels()
-        except BaseException as exc:
-            failure.append(exc)
         if completed:
             try:
-                cleanup_manager(self.manager)
+                bounded_call(
+                    "Jupyter channel cleanup",
+                    old_client.stop_channels,
+                    max(0.0, retirement_deadline - time.monotonic()),
+                )
+                bounded_call("Jupyter resource cleanup", lambda: cleanup_manager(self.manager), max(0.0, retirement_deadline - time.monotonic()))
             except BaseException as exc:
                 failure.append(exc)
         else:
-            self.manager.shutdown_wait_time = 0
-            try:
-                self.manager.shutdown_kernel(now=True)
-                cleanup_manager(self.manager)
-            except BaseException as exc:
-                failure.append(exc)
             failure.append(TimeoutError(f"shutdown_kernel(now=False) exceeded its {SHUTDOWN_DEADLINE:g}-second deadline"))
         if failure:
             self.terminal_cleanup_failure = True
@@ -512,21 +572,33 @@ class Kernel:
         return {"aborted": True, "state_lost": True, "generation": self.generation, "notice": STATE_LOST_NOTICE}
 
     def execute(self, request_id: Any, code: str, tools: list[dict[str, Any]]) -> dict[str, Any]:
-        if self.terminal_cleanup_failure:
+        if self.terminal_cleanup_failure or self.closed:
             raise RuntimeError("kernel cleanup failed; explicit lifecycle restart required")
         if len(code.encode("utf-8")) > MAX_PAYLOAD_BYTES:
             raise ValueError(f"code exceeds {MAX_PAYLOAD_BYTES} bytes")
+        with self._abort_condition:
+            if request_id in self._aborted_requests:
+                self._aborted_requests.discard(request_id)
+                return {"aborted": True, "state_lost": False, "generation": self.generation}
+        def was_aborted() -> bool:
+            with self._abort_condition:
+                return request_id in self._aborted_requests
+
         cell_id = self.bridge.registry.allocate(request_id)
         try:
             host, port = self.bridge.address
             source = proxy_source(host, port, self.generation, cell_id, tools) + "\n" + code
-            msg_id = self.client.execute(source, allow_stdin=False, store_history=True, stop_on_error=True)
+            msg_id = bounded_call(
+                "Jupyter cell submission",
+                lambda: self.client.execute(source, allow_stdin=False, store_history=True, stop_on_error=True),
+                OPERATION_DEADLINE,
+            )
+            if not self.bridge.registry.map(cell_id, msg_id):
+                return {"aborted": True, "state_lost": False, "generation": self.generation}
         except BaseException:
             self.bridge.registry.revoke(cell_id)
             raise
         try:
-            if cell_id in self.bridge.registry.cells:
-                self.bridge.registry.map(cell_id, msg_id)
             stdout = BoundedAccumulator(4096)
             stderr = BoundedAccumulator(4096)
             result = BoundedAccumulator(4096)
@@ -580,23 +652,36 @@ class Kernel:
             with self._abort_condition: self._aborted_requests.discard(request_id)
 
     def variables(self, request_id: Any) -> dict[str, Any]:
-        msg_id = self.client.execute(
-            f"{self.variables_helper}()", silent=False, allow_stdin=False, store_history=False, stop_on_error=True
+        if self.terminal_cleanup_failure or self.closed:
+            raise RuntimeError("kernel cleanup failed; explicit lifecycle restart required")
+        if self._consume_abort(request_id):
+            return {"aborted": True, "state_lost": False, "generation": self.generation}
+        deadline = time.monotonic() + OPERATION_DEADLINE
+        msg_id = bounded_call(
+            "variables submission",
+            lambda: self.client.execute(
+                f"{self.variables_helper}()", silent=False, allow_stdin=False, store_history=False, stop_on_error=True
+            ),
+            OPERATION_DEADLINE,
         )
         encoded = None
         error = None
         idle = shell_reply = False
         while not shell_reply or not idle:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("variables operation exceeded its deadline")
+            timeout = min(0.05, remaining)
             if not shell_reply:
                 try:
-                    message = self.client.shell_channel.get_msg(timeout=0.05)
+                    message = self.client.shell_channel.get_msg(timeout=timeout)
                     if parent_id(message) == msg_id and message_type(message) == "execute_reply":
                         shell_reply = True
                 except queue.Empty:
                     pass
             if not idle:
                 try:
-                    message = self.client.iopub_channel.get_msg(timeout=0.05)
+                    message = self.client.iopub_channel.get_msg(timeout=timeout)
                 except queue.Empty:
                     message = None
                 if message is not None and parent_id(message) == msg_id:
@@ -643,17 +728,37 @@ class Kernel:
         self.manager.interrupt_kernel()
 
     def reset(self) -> dict[str, Any]:
+        if self.terminal_cleanup_failure or self.closed:
+            raise RuntimeError("kernel cleanup failed; explicit lifecycle restart required")
+        deadline = time.monotonic() + SHUTDOWN_DEADLINE
         self.closed = True
         self.bridge.close()
         try:
-            self.client.stop_channels()
-        finally:
+            failure: list[BaseException] = []
             try:
-                self.manager.shutdown_kernel(now=False)
-            finally:
-                cleanup_manager(self.manager)
+                bounded_call("Jupyter channel reset", self.client.stop_channels, max(0.0, deadline - time.monotonic()))
+            except BaseException as exc:
+                failure.append(exc)
+            try:
+                bounded_call("Jupyter kernel reset", lambda: self.manager.shutdown_kernel(now=False), max(0.0, deadline - time.monotonic()))
+            except BaseException as exc:
+                failure.append(exc)
+            try:
+                bounded_call("Jupyter resource reset", lambda: cleanup_manager(self.manager), max(0.0, deadline - time.monotonic()))
+            except BaseException as exc:
+                failure.append(exc)
+            if failure:
+                raise RuntimeError(str(failure[0])) from failure[0]
+        except BaseException:
+            self.terminal_cleanup_failure = True
+            raise
         self.closed = False
-        self._start()
+        try:
+            self._start()
+        except BaseException:
+            self.terminal_cleanup_failure = True
+            self.closed = True
+            raise
         return {"reset": True, "state_lost": True, "notice": RESET_NOTICE}
 
     def close(self) -> None:
@@ -661,12 +766,14 @@ class Kernel:
         self.closed = True
         self.bridge.close()
         try:
-            self.client.stop_channels()
-        finally:
-            try:
-                self.manager.shutdown_kernel(now=False)
-            finally:
-                cleanup_manager(self.manager)
+            deadline = time.monotonic() + SHUTDOWN_DEADLINE
+            if self.client is not None:
+                bounded_call("Jupyter channel close", self.client.stop_channels, max(0.0, deadline - time.monotonic()))
+            if self.manager is not None:
+                bounded_call("Jupyter kernel close", lambda: self.manager.shutdown_kernel(now=False), max(0.0, deadline - time.monotonic()))
+                bounded_call("Jupyter resource close", lambda: cleanup_manager(self.manager), max(0.0, deadline - time.monotonic()))
+        except BaseException:
+            self.terminal_cleanup_failure = True
 
 
 class InputReader(threading.Thread):
@@ -678,15 +785,26 @@ class InputReader(threading.Thread):
             frame = sys.stdin.buffer.readline(MAX_FRAME_BYTES + 2)
             if not frame: self.requests.put(None); return
             if len(frame.rstrip(b"\n")) > MAX_FRAME_BYTES:
-                self.requests.put({"_input_error": f"input frame exceeds {MAX_FRAME_BYTES} bytes"}); return
-            try: message = json.loads(frame)
-            except Exception as exc: self.requests.put({"_input_error": f"invalid JSON: {exc}"}); continue
+                self.requests.put({"_input_error": f"input frame exceeds {MAX_FRAME_BYTES} bytes"})
+                self.requests.put(None)
+                return
+            try:
+                message = json.loads(frame)
+                if not isinstance(message, dict):
+                    raise ValueError("top-level JSON must be an object")
+            except Exception as exc:
+                self.requests.put({"_input_error": f"invalid JSON: {exc}"})
+                continue
             if message.get("type") == "tool_result":
                 kernel = self.get_kernel()
                 if kernel: kernel.bridge.registry.settle(message)
             elif message.get("operation") == "abort":
                 kernel = self.get_kernel()
-                if kernel: kernel.abort(message.get("id"))
+                if kernel:
+                    try:
+                        kernel.abort(message.get("id"))
+                    except Exception as exc:
+                        self.requests.put({"id": message.get("id"), "_input_error": f"abort failed: {exc}"})
             else: self.requests.put(message)
 
 
